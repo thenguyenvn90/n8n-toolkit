@@ -13,6 +13,7 @@ services:
       # Providers
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=n8n-network"
       # ACME (production)
       - "--certificatesresolvers.le.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
@@ -31,8 +32,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - letsencrypt:/letsencrypt
     networks: [n8n-network]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 10s
       timeout: 5s
       start_period: 10s
@@ -47,6 +50,8 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       interval: 10s
@@ -62,6 +67,8 @@ services:
     networks: [n8n-network]
     volumes:
       - redis-data:/data
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${STRONG_PASSWORD}", "ping"]
       interval: 10s
@@ -115,6 +122,8 @@ services:
       - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
       - "traefik.http.middlewares.n8n-compress.compress=true"
     networks: [n8n-network]
+    security_opt:
+      - no-new-privileges:true
 
   # External Task Runner for n8n-main
   n8n-runner-main:
@@ -128,6 +137,8 @@ services:
       n8n-main:
         condition: service_started
     networks: [n8n-network]
+    security_opt:
+      - no-new-privileges:true
 
   # Worker(s) – scale horizontally
   n8n-worker:
@@ -145,6 +156,8 @@ services:
       redis:
         condition: service_healthy
     networks: [n8n-network]
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   n8n-network:
