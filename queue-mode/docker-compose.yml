@@ -1,0 +1,161 @@
+services:
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=false"
+      # EntryPoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      # Providers
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # ACME (production)
+      - "--certificatesresolvers.le.acme.email=${SSL_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      # Logs
+      - "--log.level=INFO"
+      - "--accesslog=true"
+      # Health check
+      - "--ping=true"
+      - "--ping.entrypoint=traefikping"
+      - "--entrypoints.traefikping.address=:8082"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks: [n8n-network]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [n8n-network]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${STRONG_PASSWORD}"]
+    networks: [n8n-network]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${STRONG_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 10s
+      start_period: 10s
+      retries: 5
+
+  # Main (UI, schedules, webhooks)
+  n8n-main:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
+    container_name: n8n-main
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./local-files:/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      # Router & TLS
+      - "traefik.http.routers.n8n.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls=true"
+      - "traefik.http.routers.n8n.tls.certresolver=le"
+      # Explicitly bind router -> this service
+      - "traefik.http.routers.n8n.service=n8n-main"
+      # Tell Traefik the internal port for THIS service
+      - "traefik.http.services.n8n-main.loadbalancer.server.port=5678"
+      # Middlewares
+      - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
+      - "traefik.http.middlewares.n8n-headers.headers.STSSeconds=315360000"
+      - "traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true"
+      - "traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true"
+      - "traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true"
+      - "traefik.http.middlewares.n8n-headers.headers.STSPreload=true"
+      - "traefik.http.middlewares.n8n-rate.ratelimit.average=100"
+      - "traefik.http.middlewares.n8n-rate.ratelimit.burst=50"
+      - "traefik.http.middlewares.n8n-rate.ratelimit.period=1s"
+      - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
+      - "traefik.http.middlewares.n8n-compress.compress=true"
+    networks: [n8n-network]
+
+  # External Task Runner for n8n-main
+  n8n-runner-main:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
+    restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint: ["/usr/local/bin/task-runner-launcher"]
+    command: ["javascript"]
+    depends_on:
+      n8n-main:
+        condition: service_started
+    networks: [n8n-network]
+
+  # Worker(s) – scale horizontally
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./local-files:/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [n8n-network]
+
+networks:
+  n8n-network:
+    driver: bridge
+
+volumes:
+  n8n-data:
+    external: true
+  postgres-data:
+    external: true
+  redis-data:
+    external: true
+  letsencrypt:
+    external: true
