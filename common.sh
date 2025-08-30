@@ -801,7 +801,7 @@ verify_traefik_certificate() {
         if http_code="$(curl -fsS -o /dev/null -w '%{http_code}' \
                          --connect-timeout 5 --max-time 15 \
                          "${domain_url}")"; then
-            if [[ "$http_code" =~ ^(200|301|302|308|404)$ ]]; then
+            if [[ "$http_code" =~ ^([2-5][0-9][0-9])$ ]]; then
                 log INFO "HTTPS reachable (HTTP ${http_code}) [attempt ${i}/${MAX_RETRIES}]"
                 success=true
                 break
@@ -876,7 +876,7 @@ check_services_up_running() {
 ################################################################################
 check_domain() {
     local server_ip domain_ips resolver=""
-    server_ip=$(curl -s https://api.ipify.org || echo "Unavailable")
+    server_ip=$(curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org || echo "Unavailable")
 
     if command -v dig >/dev/null 2>&1; then
         resolver="dig"
@@ -958,6 +958,7 @@ get_latest_n8n_version() {
 ################################################################################
 list_available_versions() {
     require_cmd jq || return 1
+    require_cmd curl || return 1
 
     local url="https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100"
     local next page_json
