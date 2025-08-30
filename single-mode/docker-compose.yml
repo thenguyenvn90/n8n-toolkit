@@ -13,6 +13,7 @@ services:
       # Providers
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=n8n-network"
       # ACME RESOLVERS (production)
       - "--certificatesresolvers.le.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
@@ -33,7 +34,7 @@ services:
     networks:
       - n8n-network
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 10s
       timeout: 5s
       start_period: 20s
@@ -68,6 +69,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - n8n-network
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
       interval: 10s
@@ -97,8 +102,6 @@ services:
       # Retry and compression
       - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
       - "traefik.http.middlewares.n8n-compress.compress=true"
-    networks:
-      - n8n-network
 
 networks:
   n8n-network:
