@@ -119,7 +119,6 @@ on_interrupt() {
 #   - Logs failed command, file, line, and function.
 #   - Calls print_stacktrace().
 #   - Runs `docker compose ps` (if compose file present).
-#   - Exits with the original failing command’s exit code.
 #
 # Returns:
 #   Never returns (exits with prior exit code).
@@ -154,53 +153,39 @@ on_error() {
 #   - Maps common command→package name differences on Debian/Ubuntu:
 #       * msmtp   → msmtp-mta
 #       * dig     → dnsutils
-#       * getent  → libc-bin   (usually present)
+#       * getent  → libc-bin
 #       * gpg     → gnupg
-#     (Otherwise, assumes package name equals the command.)
 #   - Installs with: `apt-get install -y --no-install-recommends <package>`
-#     in noninteractive mode, then re-checks the command is available.
-#   - Logs informative messages on update/install steps and failures.
 #
 # Returns:
-#   0  if the command is present or is installed successfully.
-#   1  if installation fails or a supported package manager is not available.
-#
-# Side effects:
-#   - May run `apt-get update` and install system packages.
-#   - Sets global APT_UPDATED=true after the first `apt-get update`.
+#   0 on success; 1 on failure.
 ################################################################################
 require_cmd() {
     local cmd="$1"
 
-    # Already present?
     if command -v "$cmd" >/dev/null 2>&1; then
         return 0
     fi
 
-    # Special case: don't try to apt-get docker via this helper
     if [[ "$cmd" == "docker" ]]; then
         log ERROR "Docker is missing. Please run the Docker installer step (install_prereqs) first."
         return 1
     fi
 
-    # We only support apt-get here (Ubuntu/Debian). Extend if needed.
     if ! command -v apt-get >/dev/null 2>&1; then
         log ERROR "Command '$cmd' not found and no supported package manager (apt-get) available."
         return 1
     fi
 
-    # Map command -> package name (when they differ)
     local pkg="$cmd"
     case "$cmd" in
-        msmtp)   pkg="msmtp-mta" ;;   # provides 'msmtp' binary on Debian/Ubuntu
-        dig)     pkg="dnsutils"  ;;
-        getent)  pkg="libc-bin"  ;;   # usually already installed
-        gpg)     pkg="gnupg"     ;;
-        # most others keep pkg="$cmd"
+        msmtp)  pkg="msmtp-mta" ;;
+        dig)    pkg="dnsutils"  ;;
+        getent) pkg="libc-bin"  ;;
+        gpg)    pkg="gnupg"     ;;
     esac
 
-    # Update package index once
-    if [[ "$APT_UPDATED" != true ]]; then
+    if [[ "${APT_UPDATED:-false}" != true ]]; then
         log INFO "Updating package index (apt-get update)…"
         apt-get update -y || true
         APT_UPDATED=true
@@ -209,7 +194,6 @@ require_cmd() {
     log INFO "Installing missing command '$cmd' (package: $pkg)…"
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" || true
 
-    # Verify installation
     if command -v "$cmd" >/dev/null 2>&1; then
         return 0
     fi
@@ -222,9 +206,6 @@ require_cmd() {
 # check_root()
 # Description:
 #   Ensure the script is running as root (EUID = 0).
-#
-# Behaviors:
-#   - Logs ERROR and returns non-zero if not root.
 #
 # Returns:
 #   0 if root; 1 otherwise.
@@ -240,9 +221,6 @@ check_root() {
 # upsert_env_var()
 # Description:
 #   Insert or update KEY=VALUE in a .env file idempotently.
-#
-# Behaviors:
-#   - Replaces existing line matching ^KEY=... or appends a new line.
 #
 # Returns:
 #   0 on success; non-zero on failure.
@@ -261,10 +239,6 @@ upsert_env_var() {
 # Description:
 #   Mask a secret by showing only the first and last 4 characters.
 #
-# Behaviors:
-#   - If length ≤ 8, prints the string unchanged.
-#   - Else prints: XXXX***YYYY
-#
 # Returns:
 #   0 always (prints masked value to stdout).
 ################################################################################
@@ -280,9 +254,6 @@ mask_secret() {
 # Description:
 #   Heuristic check whether a string looks like base64.
 #
-# Behaviors:
-#   - Tests against regex: ^[A-Za-z0-9+/=]+$
-#
 # Returns:
 #   0 if matches; 1 otherwise.
 ################################################################################
@@ -297,10 +268,9 @@ looks_like_b64() {
 #
 # Behaviors:
 #   - Uses provided path or falls back to ENV_FILE or $N8N_DIR/.env.
-#   - Warns and no-ops if file does not exist.
 #
 # Returns:
-#   0 on success or when file missing (no-op); non-zero on source errors.
+#   0 on success or when file missing (no-op).
 ################################################################################
 load_env_file() {
     local f="${1:-${ENV_FILE:-}}"
@@ -316,12 +286,6 @@ load_env_file() {
 # read_env_var()
 # Description:
 #   Read and print the value of KEY from a .env-style file.
-#
-# Behaviors:
-#   - Ignores blank lines and full-line comments.
-#   - Supports unquoted, single-quoted, and double-quoted values.
-#   - Trims inline comments for unquoted values.
-#   - Only the first '=' is treated as the separator.
 #
 # Returns:
 #   0 if key found (prints value); 1 if file missing or key not found.
@@ -350,28 +314,22 @@ read_env_var() {
 }
 
 ################################################################################
-# ensure_encryption_key_exists()
+# ensure_encryption_key()
 # Description:
 #   Verify N8N_ENCRYPTION_KEY exists in the given .env and looks reasonable.
-#
-# Behaviors:
-#   - Reads N8N_ENCRYPTION_KEY via read_env_var().
-#   - ERROR if missing; WARN if not base64-like.
-#   - Logs masked key on success.
 #
 # Returns:
 #   0 if present; 1 if missing.
 ################################################################################
-ensure_encryption_key_exists() {
-    local env_file="$1"
+ensure_encryption_key() {
     local key
-    key="$(read_env_var "$env_file" N8N_ENCRYPTION_KEY || true)"
+    key="$(read_env_var "$ENV_FILE" N8N_ENCRYPTION_KEY || true)"
     if [[ -z "$key" ]]; then
-        log ERROR "N8N_ENCRYPTION_KEY is missing in $env_file. Aborting to avoid an unrecoverable restore."
+        log ERROR "N8N_ENCRYPTION_KEY is missing in $ENV_FILE. Aborting to avoid an unrecoverable restore."
         return 1
     fi
     if ! looks_like_b64 "$key"; then
-        log WARN "N8N_ENCRYPTION_KEY in $env_file does not look like base64. Continue at your own risk."
+        log WARN "N8N_ENCRYPTION_KEY in $ENV_FILE does not look like base64. Continue at your own risk."
     fi
     log INFO "N8N_ENCRYPTION_KEY present (masked): $(mask_secret "$key")"
 }
@@ -381,11 +339,6 @@ ensure_encryption_key_exists() {
 # Description:
 #   Normalize and validate a domain/hostname string.
 #
-# Behaviors:
-#   - Lowercases; strips scheme, path, query, fragment, port, trailing dot, and www.
-#   - Validates against strict hostname regex and overall length.
-#   - Prints normalized domain on success.
-#
 # Returns:
 #   0 on success (prints domain); exits 2 on invalid input.
 ################################################################################
@@ -393,23 +346,18 @@ parse_domain_arg() {
     local raw="$1"
     local d
 
-    # Normalize
-    d="${raw,,}"                              # lowercase
-    d="${d#"${d%%[![:space:]]*}"}"            # trim leading space
-    d="${d%"${d##*[![:space:]]}"}"            # trim trailing space
-    d="${d#http://}"; d="${d#https://}"       # strip scheme
-    d="${d%%/*}"                              # strip path (/...), if any
-    d="${d%%\?*}"                             # strip query
-    d="${d%%\#*}"                             # strip fragment
-    d="${d%%:*}"                              # strip :port
-    d="${d%.}"                                # strip trailing dot
+    d="${raw,,}"
+    d="${d#"${d%%[![:space:]]*}"}"
+    d="${d%"${d##*[![:space:]]}"}"
+    d="${d#http://}"; d="${d#https://}"
+    d="${d%%/*}"
+    d="${d%%\?*}"
+    d="${d%%\#*}"
+    d="${d%%:*}"
+    d="${d%.}"
 
-    # Strip "www."
     [[ "$d" == www.* ]] && d="${d#www.}"
 
-    # Validate
-    # Hostname labels: a-z, 0-9, hyphen (no leading/trailing '-'), 1–63 chars per label
-    # At least one dot; TLD 2–63 letters; total length <= 253
     local re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
     if [[ -z "$d" || ${#d} -gt 253 || ! "$d" =~ $re ]]; then
         log ERROR "Invalid domain: '$raw' → '$d'. Expected a hostname like n8n.example.com"
@@ -422,32 +370,56 @@ parse_domain_arg() {
 ################################################################################
 # compose()
 # Description:
-#   Wrapper around `docker compose` that always supplies --env-file and -f.
-#
-# Behaviors:
-#   - Requires ENV_FILE and COMPOSE_FILE to be set.
-#   - Forwards all additional arguments to `docker compose`.
+#   Wrapper around `docker compose` that always targets the correct project
+#   directory and compose file, and uses the .env when available.
 #
 # Returns:
-#   Exit code from `docker compose`; 1 if ENV_FILE/COMPOSE_FILE unset.
+#   Exit code from `docker compose`; 1 on missing config or docker.
 ################################################################################
-# Expect: ENV_FILE, COMPOSE_FILE set by caller scripts.
 compose() {
-    if [[ -z "${COMPOSE_FILE:-}" || -z "${ENV_FILE:-}" ]]; then
-        log ERROR "compose(): COMPOSE_FILE/ENV_FILE not set"; return 1
+    require_cmd docker || return 1
+
+    if [[ -z "${N8N_DIR:-}" || -z "${COMPOSE_FILE:-}" || -z "${ENV_FILE:-}" ]]; then
+        log ERROR "compose(): N8N_DIR/COMPOSE_FILE/ENV_FILE must be set"
+        return 1
     fi
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
+        log ERROR "compose(): compose file not found: $COMPOSE_FILE"
+        return 1
+    fi
+
+    local flags=(--project-directory "$N8N_DIR" -f "$COMPOSE_FILE")
+    if [[ -f "$ENV_FILE" ]]; then
+        flags+=(--env-file "$ENV_FILE")
+    else
+        log WARN "compose(): ENV_FILE not found at $ENV_FILE (continuing without --env-file)"
+    fi
+
+    docker compose "${flags[@]}" "$@"
+}
+
+################################################################################
+# docker_up_check()
+# Description:
+#   Ensure external volumes, bring up the stack, and wait for health.
+#
+# Returns:
+#   0 on success; 1 on health failures.
+################################################################################
+docker_up_check() {
+    discover_from_compose || true
+    ensure_external_volumes
+    log INFO "Starting Docker Compose…"
+    compose pull --quiet || true
+    compose up -d || return 1
+    wait_for_containers_healthy 180 10 || return 1
+    verify_traefik_certificate "$DOMAIN" || return 1
 }
 
 ################################################################################
 # strict_env_check()
 # Description:
 #   Validate that all ${VARS} used in compose file exist in the .env file.
-#
-# Behaviors:
-#   - Extracts ${VAR} tokens from compose file.
-#   - Builds a set of keys present in .env (ignores comments/blank).
-#   - Logs missing variables, if any.
 #
 # Returns:
 #   0 if all present; 1 if any are missing or .env is missing.
@@ -457,19 +429,23 @@ strict_env_check() {
     [[ -f "$env_file" ]] || { log ERROR ".env file not found at $env_file"; return 1; }
 
     log INFO "Checking for unset environment variables in $compose_file..."
-    local vars_in_compose missing_vars=()
-	# Extract VAR from ${VAR}, ${VAR:-...}, ${VAR?err}, etc.
-	vars_in_compose=$(grep -oP '\$\{\K[A-Za-z_][A-Za-z0-9_]*(?=[^}]*)' "$compose_file" | sort -u)
+    local vars_in_compose
+    # Extract VAR from ${VAR}, ${VAR:-...}, ${VAR?err}, etc.
+    if vars_in_compose=$(grep -oP '\$\{\K[A-Za-z_][A-Za-z0-9_]*(?=[^}]*)' "$compose_file" 2>/dev/null | sort -u); then
+        :
+    else
+        # POSIX fallback when -P unsupported
+        vars_in_compose=$(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$compose_file" | sed 's/^\${//' | sort -u)
+    fi
 
-    # Build KEY set from .env (ignore comments/blank). Accept: KEY=..., no "export".
-	
     declare -A envmap
     while IFS='=' read -r k v; do
         [[ -z "$k" || "$k" =~ ^\s*# ]] && continue
-        k="${k%% *}"; k="${k%%	*}"
+        k="${k%% *}"; k="${k%%    *}"
         envmap["$k"]=1
     done < "$env_file"
 
+    local missing_vars=()
     for var in $vars_in_compose; do
         [[ -n "${envmap[$var]:-}" ]] || missing_vars+=("$var")
     done
@@ -489,20 +465,14 @@ strict_env_check() {
 # Description:
 #   Run strict_env_check and `compose config` to catch unset Vars/syntax errors.
 #
-# Behaviors:
-#   - Verifies COMPOSE_FILE and ENV_FILE exist.
-#   - Fails if strict_env_check reports missing keys.
-#   - Runs `compose config` and checks for "variable is not set" or errors.
-#
 # Returns:
 #   0 if valid; 1 on any validation error.
 ################################################################################
 validate_compose_and_env() {
     [[ -f "${COMPOSE_FILE:-}" ]] || { log ERROR "Missing COMPOSE_FILE"; return 1; }
-    [[ -f "${ENV_FILE:-}" ]]     || { log ERROR "Missing ENV_FILE"; return 1; }
+    [[ -f "${ENV_FILE:-}"     ]] || { log ERROR "Missing ENV_FILE"; return 1; }
     strict_env_check "$COMPOSE_FILE" "$ENV_FILE" || return 1
 
-    # Validate docker-compose config syntax
     local config_output
     config_output=$(compose config 2>&1) || true
 
@@ -522,10 +492,6 @@ validate_compose_and_env() {
 # dump_unhealthy_container_logs()
 # Description:
 #   For all containers in the compose project, print logs for non-running/unhealthy ones.
-#
-# Behaviors:
-#   - Iterates `compose ps -q` containers.
-#   - Inspects state and health; prints last logs for offenders.
 #
 # Returns:
 #   0 always.
@@ -552,11 +518,6 @@ dump_unhealthy_container_logs() {
 # wait_for_containers_healthy()
 # Description:
 #   Wait until all compose containers are running and healthy (or timeout).
-#
-# Behaviors:
-#   - Polls every <interval> seconds (default 10) up to <timeout> (default 180).
-#   - Validates that each expected service has at least one running container.
-#   - Logs per-cycle status and offenders; dumps logs on timeout.
 #
 # Returns:
 #   0 if all healthy before timeout; 1 on timeout.
@@ -611,11 +572,6 @@ wait_for_containers_healthy() {
 # Description:
 #   Wait until a specific container is running and healthy (or timeout).
 #
-# Behaviors:
-#   - Resolves container by compose service name, falling back to docker ps by name.
-#   - Accepts health "none" or "healthy" as OK when status is "running".
-#   - Polls every <interval> seconds until <timeout>.
-#
 # Returns:
 #   0 if healthy; 1 on timeout or not found.
 ################################################################################
@@ -629,10 +585,9 @@ check_container_healthy() {
 
     while [ $elapsed -lt $timeout ]; do
         local container_id
-		compose ps || true
-		container_id="$(compose ps -q "$container_name" 2>/dev/null || true)"
-		if [[ -z "$container_id" ]]; then
-            container_id=$(docker ps -q -f "name=${container_name}" || true)
+        container_id="$(compose ps -q "$container_name" 2>/dev/null || true)"
+        if [[ -z "$container_id" ]]; then
+            container_id=$(docker ps -q -f "name=^${container_name}$" || true)
         fi
 
         if [[ -z "$container_id" ]]; then
@@ -668,12 +623,6 @@ check_container_healthy() {
 # Description:
 #   Parse docker compose to discover services, volumes, external volumes,
 #   expected container names (container_name or service fallback), and mode.
-#
-# Behaviors:
-#   - Uses `docker compose config --format json` if jq is present; falls back to
-#     `--services` / `--volumes`.
-#   - Fills DISCOVERED_SERVICES, DISCOVERED_VOLUMES, DISCOVERED_VOLUME_EXTERNAL,
-#     DISCOVERED_CONTAINER_NAMES, and DISCOVERED_MODE.
 #
 # Returns:
 #   0 on success; non-zero on failure to parse services.
@@ -750,10 +699,6 @@ discover_from_compose() {
 # Description:
 #   Pre-create any compose volumes that are marked external.
 #
-# Behaviors:
-#   - Uses DISCOVERED_VOLUME_EXTERNAL list.
-#   - Creates any missing external volume via `docker volume create`.
-#
 # Returns:
 #   0 always (warns on create failures but continues).
 ################################################################################
@@ -775,10 +720,6 @@ ensure_external_volumes() {
 # Description:
 #   Populate RUNNING_CONTAINER_NAMES with running container names in this project.
 #
-# Behaviors:
-#   - Uses `docker compose ps --format '{{.Name}}'`.
-#   - De-duplicates and sorts the result.
-#
 # Returns:
 #   0 always.
 ################################################################################
@@ -798,14 +739,8 @@ discover_running_containers() {
 # Description:
 #   Compare expected containers (from compose) against actually running ones.
 #
-# Behaviors:
-#   - Expected set: DISCOVERED_CONTAINER_NAMES.
-#   - Service name is satisfied by any running container for that service.
-#   - Explicit container_name must appear as a running container.
-#   - Prints a newline-separated list of missing expected entries (empty if none).
-#
 # Returns:
-#   0 always (output is the list to consume by caller).
+#   0 always (prints newline-separated list of missing expected entries).
 ################################################################################
 find_missing_expected_containers() {
     declare -A svc_has=()
@@ -832,44 +767,17 @@ find_missing_expected_containers() {
 }
 
 ################################################################################
-# docker_up_check()
-# Description:
-#   Ensure external volumes, bring up the stack, and wait for health.
-#
-# Behaviors:
-#   - Runs discover_from_compose, ensure_external_volumes, compose up -d.
-#   - Waits for containers to be healthy via wait_for_containers_healthy().
-#
-# Returns:
-#   0 on success; 1 on health failures.
-################################################################################
-docker_up_check() {
-    discover_from_compose || true
-    ensure_external_volumes
-    log INFO "Starting Docker Compose…"
-    compose up -d
-    wait_for_containers_healthy 180 10
-}
-
-################################################################################
 # verify_traefik_certificate()
+# Description:
 #   Lightweight post-deploy TLS check: confirm HTTPS reaches Traefik (valid TLS)
 #   and (best-effort) log issuer/subject/dates via openssl.
 #
-# Behavior:
-#   - DNS hint (A/AAAA) if `dig` is available.
-#   - Treats HTTPS status 200/301/302/308/404 as success (TLS OK even if 404).
-#   - Retries HTTPS up to 6 times with short delays.
-#   - Tries to read and log certificate issuer/subject/notBefore/notAfter.
-#   - Cert introspection is best-effort; failure to parse does NOT fail the check.
-#
 # Returns:
-#   0 on HTTPS success (TLS established), regardless of cert introspection result.
-#   1 only if HTTPS cannot be reached after retries.
+#   0 on HTTPS success; 1 only if HTTPS cannot be reached after retries.
 ################################################################################
 verify_traefik_certificate() {
     local domain="${1:-${DOMAIN:-}}"
-    local MAX_RETRIES="${2:-6}"
+    local MAX_RETRIES="${2:-12}"
     local SLEEP_INTERVAL="${3:-10}"
     local domain_url curl_rc http_code success=false
 
@@ -879,7 +787,6 @@ verify_traefik_certificate() {
     fi
     domain_url="https://${domain}"
 
-    # DNS A/AAAA (optional)
     if command -v dig >/dev/null 2>&1; then
         log INFO "DNS A records for ${domain}:"
         dig +short A "$domain" | sed 's/^/  - /' || true
@@ -891,11 +798,9 @@ verify_traefik_certificate() {
 
     log INFO "Checking HTTPS reachability (valid chain required by curl)…"
     for ((i=1; i<=MAX_RETRIES; i++)); do
-        # --fail makes curl exit non-zero on HTTP >= 400 and TLS/conn errors
         if http_code="$(curl -fsS -o /dev/null -w '%{http_code}' \
                          --connect-timeout 5 --max-time 15 \
                          "${domain_url}")"; then
-            # Consider TLS OK if HTTP is up: 200/301/302/308/404
             if [[ "$http_code" =~ ^(200|301|302|308|404)$ ]]; then
                 log INFO "HTTPS reachable (HTTP ${http_code}) [attempt ${i}/${MAX_RETRIES}]"
                 success=true
@@ -905,7 +810,6 @@ verify_traefik_certificate() {
             fi
         else
             curl_rc=$?
-            # When curl fails, http_code will usually be empty or "000"
             log WARN "HTTPS not ready (curl_exit=${curl_rc}, http=${http_code:-N/A}) [attempt ${i}/${MAX_RETRIES}]"
         fi
         [[ $i -lt $MAX_RETRIES ]] && { log INFO "Retrying in ${SLEEP_INTERVAL}s..."; sleep "$SLEEP_INTERVAL"; }
@@ -918,7 +822,6 @@ verify_traefik_certificate() {
         return 1
     fi
 
-    # Best-effort cert details (non-fatal)
     if command -v openssl >/dev/null 2>&1; then
         log INFO "Fetching certificate details (best-effort)…"
         local cert_info issuer subject not_before not_after
@@ -939,49 +842,65 @@ verify_traefik_certificate() {
     else
         log WARN "'openssl' not found; skipping certificate inspection."
     fi
-
     return 0
 }
 
 ################################################################################
-# check_domain_points_here()
+# check_services_up_running()
 # Description:
-#   Verify the provided domain’s A record points to this server’s public IP.
-#
-# Behaviors:
-#   - Detects server IP via api.ipify.org.
-#   - Resolves DOMAIN with `dig` (preferred) or `getent`; logs resolved IPs.
-#   - Warns and continues if resolver tools are missing.
+#   High-level health gate for the stack: containers + TLS certificate.
 #
 # Returns:
-#   0 on success/skip (no resolver); 1 on mismatch.
+#   0 if all checks pass; 1 otherwise.
 ################################################################################
-check_domain_points_here() {
-    local domain="$1"
-    require_cmd curl || { log WARN "curl missing; cannot verify DNS."; return 0; }
+check_services_up_running() {
+    if ! wait_for_containers_healthy; then
+        log ERROR "Some containers are not running or unhealthy. Please check the logs above."
+        return 1
+    fi
+
+    if ! verify_traefik_certificate "$DOMAIN"; then
+        log ERROR "Traefik failed to issue a valid TLS certificate. Please check DNS, Traefik logs, and try again."
+        return 1
+    fi
+    return 0
+}
+
+################################################################################
+# check_domain()
+# Description:
+#   Verify the provided DOMAIN’s A record points to this server’s public IP.
+#
+# Returns:
+#   0 on success/skip (no resolver); exits 1 on mismatch.
+################################################################################
+check_domain() {
     local server_ip domain_ips resolver=""
-    server_ip="$(curl -s https://api.ipify.org || echo "Unavailable")"
+    server_ip=$(curl -s https://api.ipify.org || echo "Unavailable")
+
     if command -v dig >/dev/null 2>&1; then
         resolver="dig"
-        domain_ips="$(dig +short A "$domain" | tr '\n' ' ')"
+        domain_ips=$(dig +short A "$DOMAIN" | tr '\n' ' ')
     elif command -v getent >/dev/null 2>&1; then
         resolver="getent"
-        domain_ips="$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u | tr '\n' ' ')"
+        domain_ips=$(getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u | tr '\n' ' ')
     else
-        log WARN "No 'dig' nor 'getent'; DNS check skipped."
+        log WARN "Neither 'dig' nor 'getent' found; DNS check will be skipped."
+    fi
+
+    log INFO "Your server's public IP is: $server_ip"
+    [[ -n "$resolver" ]] && log INFO "Domain $DOMAIN resolves (via $resolver): $domain_ips"
+
+    if [[ -z "$resolver" || "$server_ip" == "Unavailable" ]]; then
+        log WARN "Cannot verify DNS → continuing; Let's Encrypt may fail if DNS is wrong."
         return 0
     fi
-    log INFO "Server public IP: $server_ip"
-    log INFO "Domain ${domain} resolves (${resolver}): $domain_ips"
-    if [[ "$server_ip" == "Unavailable" ]]; then
-        log WARN "Could not determine server IP; continuing."
-        return 0
-    fi
+
     if echo "$domain_ips" | tr ' ' '\n' | grep -Fxq "$server_ip"; then
-        log INFO "Domain points to this server."
+        log INFO "Domain $DOMAIN is correctly pointing to this server."
     else
-        log ERROR "Domain does NOT point here. Update A record to: $server_ip"
-        return 1
+        log ERROR "Domain $DOMAIN is NOT pointing to this server. Update your A record to: $server_ip"
+        exit 1
     fi
 }
 
@@ -990,30 +909,29 @@ check_domain_points_here() {
 # Description:
 #   Print the running n8n version by exec'ing into the n8n container.
 #
-# Behaviors:
-#   - Tries `compose ps -q n8n`; falls back to `docker exec n8n`.
-#   - Prints "unknown" if not available.
-#
 # Returns:
 #   0 always (prints version or "unknown").
 ################################################################################
 get_current_n8n_version() {
-    local cid
-    cid="$(compose ps -q n8n 2>/dev/null || true)"
-    if [[ -n "$cid" ]]; then
-        docker exec "$cid" n8n --version 2>/dev/null && return 0
-    fi
-    docker exec n8n n8n --version 2>/dev/null || echo "unknown"
+    local cid ver
+    # Try common container names in priority order
+    for name in n8n n8n-main; do
+        cid="$(compose ps -q "$name" 2>/dev/null || true)"
+        [[ -z "$cid" ]] && cid="$(docker ps -q -f "name=^/${name}$" || true)"
+        if [[ -n "$cid" ]]; then
+            ver="$(docker exec "$cid" n8n --version 2>/dev/null | awk '{print $NF}' | tr -d '\r')"
+            if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ver"; return 0
+            fi
+        fi
+    done
+    echo "0.0.0"
 }
 
 ################################################################################
 # get_latest_n8n_version()
 # Description:
 #   Fetch the latest stable semver tag (x.y.z) of n8n from Docker Hub.
-#
-# Behaviors:
-#   - Requests tags page and filters stable semver names.
-#   - Prints the newest version (sort -Vr | head -n1).
 #
 # Returns:
 #   0 on success (may print empty on API issues); 1 if jq missing.
@@ -1031,23 +949,15 @@ get_latest_n8n_version() {
 }
 
 ################################################################################
-# fetch_all_stable_versions()
+# list_available_versions()
 # Description:
 #   Retrieve and print all stable semver tags (x.y.z) from Docker Hub.
-#
-# Behaviors:
-#   - Requires jq.
-#   - Follows pagination; aggregates results.
-#   - Prints unique ascending-sorted list.
 #
 # Returns:
 #   0 on success (even if none found); 1 if jq missing.
 ################################################################################
-fetch_all_stable_versions() {
-    if ! command -v jq >/dev/null 2>&1; then
-        log ERROR "'jq' is required to fetch tags from Docker Hub."
-        return 1
-    fi
+list_available_versions() {
+    require_cmd jq || return 1
 
     local url="https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100"
     local next page_json
@@ -1067,7 +977,6 @@ fetch_all_stable_versions() {
         return 0
     fi
 
-    # print unique, sorted ascending (natural/semantic)
     printf "%s\n" "${all[@]}" | sort -Vu
 }
 
@@ -1075,9 +984,6 @@ fetch_all_stable_versions() {
 # validate_image_tag()
 # Description:
 #   Check whether an n8n image tag exists.
-#
-# Behaviors:
-#   - Tries docker.n8n.io then docker.io registries via `docker manifest inspect`.
 #
 # Returns:
 #   0 if found; 1 otherwise.
@@ -1087,4 +993,69 @@ validate_image_tag() {
     docker manifest inspect "docker.n8n.io/n8nio/n8n:${tag}" >/dev/null 2>&1 && return 0
     docker manifest inspect "docker.io/n8nio/n8n:${tag}" >/dev/null 2>&1 && return 0
     return 1
+}
+
+################################################################################
+# get_google_drive_link()
+# Description:
+#   Produce Google Drive folder URL for the configured rclone remote.
+#
+# Behaviors:
+#   - Reads root_folder_id from rclone config for the remote **name**.
+#
+# Returns:
+#   0 always (outputs URL or empty on stdout).
+################################################################################
+get_google_drive_link() {
+    if [[ -z "$RCLONE_REMOTE" ]]; then
+        echo ""
+        return
+    fi
+
+    # Use only the remote name before the first colon
+    local remote_name="${RCLONE_REMOTE%%:*}"
+    [[ -n "$remote_name" ]] || { echo ""; return; }
+
+    local folder_id
+    folder_id=$(rclone config show "$remote_name" 2>/dev/null \
+            | awk -F '=' '$1 ~ /root_folder_id/ { gsub(/[[:space:]]/, "", $2); print $2 }')
+
+    if [[ -n "$folder_id" ]]; then
+        echo "https://drive.google.com/drive/folders/$folder_id"
+    else
+        log WARN "Could not find root_folder_id for remote '$remote_name'"
+        echo ""
+    fi
+}
+
+################################################################################
+# box_line()
+# Description:
+#   Pretty print a left-justified label and value for summary boxes.
+#
+# Returns:
+#   0 always.
+################################################################################
+box_line() {
+    local label="$1"
+    local value="$2"
+    printf '%-24s %s\n' "$label" "$value"
+}
+
+################################################################################
+# dump_service_logs()
+# Description:
+#   Dump logs for a single container by name (best-effort).
+#
+# Returns:
+#   0 always.
+################################################################################
+dump_service_logs() {
+    local name="$1"
+    local tail="${2:-200}"
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "$name"; then
+        docker logs --tail "$tail" "$name" || true
+    else
+        log WARN "Container '$name' not found for log dump."
+    fi
 }
