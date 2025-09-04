@@ -71,6 +71,7 @@ SSL_EMAIL=""
 # Upgrade/Install shared
 N8N_VERSION="latest"
 FORCE_FLAG=false
+BACKUP_REQUIRE_TLS="${BACKUP_REQUIRE_TLS:-false}"
 
 # Backup/Restore
 TARGET_RESTORE_FILE=""
@@ -231,62 +232,121 @@ set_paths() {
 ################################################################################
 # install_prereqs()
 # Description:
-#   Install Docker Engine and Compose v2 on Ubuntu with safe fallbacks.
+#   Install Docker Engine and Compose v2 with safe fallbacks, then common tools.
 #
 # Behaviors:
-#   - If Docker present → skip install.
-#   - Else add Docker apt repo & key, install engine + compose plugin.
-#   - Fallback to get.docker.com script if apt install fails.
-#   - Installs common dependencies (jq, rsync, tar, msmtp, dnsutils, openssl, pigz).
-#   - Enables & starts docker via systemd if available.
-#   - Adds invoking user to docker group.
+#   - If Docker already works → skip engine install but still ensure deps.
+#   - Debian/Ubuntu family: use official Docker APT repo when codename supported.
+#   - Non-Debian/Ubuntu or unsupported codename: use convenience script.
+#   - Installs ancillary packages (jq, rsync, tar, msmtp-mta, dnsutils, openssl, pigz, vim).
+#   - Enables/starts docker via systemd when available.
+#   - Adds invoking user to the "docker" group (effective after re-login).
 #
 # Returns:
-#   0 on success (best-effort with fallbacks).
+#   0 on success; 1 if Docker not available after all attempts.
 ################################################################################
 install_prereqs() {
+    # Fast path: Docker already installed and responding?
     if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
-        log INFO "Docker already installed. Skipping Docker install."
+        log INFO "Docker already installed. Skipping engine install."
     else
-        log INFO "Installing prerequisites (curl, ca-certificates, gpg, lsb-release)…"
-        DEBIAN_FRONTEND=noninteractive apt-get update -y
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+        # Try to use APT repo on Debian/Ubuntu; otherwise fall back to script
+        . /etc/os-release 2>/dev/null || true
+        local DISTRO_ID="${ID:-}"
+        local DISTRO_LIKE="${ID_LIKE:-}"
+        local DISTRO_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+        if [[ -z "$DISTRO_CODENAME" ]] && command -v lsb_release >/dev/null 2>&1; then
+            DISTRO_CODENAME="$(lsb_release -cs 2>/dev/null || true)"
+        fi
 
-        log INFO "Adding Docker GPG key (non-interactive)…"
-        mkdir -p /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-            | gpg --dearmor | tee /etc/apt/keyrings/docker.gpg > /dev/null
-        chmod a+r /etc/apt/keyrings/docker.gpg
+        local is_deb_like=false
+        if [[ "$DISTRO_ID" =~ ^(debian|ubuntu)$ ]] || [[ "$DISTRO_LIKE" == *debian* ]] || [[ "$DISTRO_LIKE" == *ubuntu* ]]; then
+            is_deb_like=true
+        fi
 
-        log INFO "Adding Docker repository…"
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        DEBIAN_FRONTEND=noninteractive apt-get update -y
+        if $is_deb_like && command -v apt-get >/dev/null 2>&1; then
+            log INFO "Detected Debian/Ubuntu family (ID=${DISTRO_ID:-?}, CODENAME=${DISTRO_CODENAME:-?})."
+            DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release || true
 
-        log INFO "Installing Docker Engine and Docker Compose v2…"
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-            log WARN "APT install from Docker repo failed. Falling back to official convenience script…"
+            local repo_base="debian"
+            [[ "$DISTRO_ID" == "ubuntu" || "$DISTRO_LIKE" == *ubuntu* ]] && repo_base="ubuntu"
+
+            if [[ -z "$DISTRO_CODENAME" ]]; then
+                log WARN "Could not determine distro codename; using Docker convenience script."
+                curl -fsSL https://get.docker.com | sh
+            else
+                local REPO_CHECK_URL="https://download.docker.com/linux/${repo_base}/dists/${DISTRO_CODENAME}/Release"
+                if curl -fsS --connect-timeout 5 --max-time 10 "$REPO_CHECK_URL" >/dev/null 2>&1; then
+                    log INFO "Configuring Docker APT repo for ${repo_base} ${DISTRO_CODENAME}…"
+                    install -d -m 0755 /etc/apt/keyrings
+                    if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
+                        curl -fsSL "https://download.docker.com/linux/${repo_base}/gpg" \
+                          | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                        chmod a+r /etc/apt/keyrings/docker.gpg
+                    else
+                        log INFO "Docker GPG key already present."
+                    fi
+
+                    local arch; arch="$(dpkg --print-architecture)"
+                    echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${repo_base} ${DISTRO_CODENAME} stable" \
+                      > /etc/apt/sources.list.d/docker.list
+
+                    DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+                    log INFO "Installing Docker Engine and Compose v2 from Docker APT repo…"
+                    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+                        log WARN "APT install failed; falling back to Docker convenience script."
+                        curl -fsSL https://get.docker.com | sh
+                    fi
+                else
+                    log WARN "Docker repo does not publish '${repo_base}/${DISTRO_CODENAME}'; using convenience script."
+                    curl -fsSL https://get.docker.com | sh
+                fi
+            fi
+        else
+            log INFO "Non–Debian/Ubuntu or no apt-get detected (ID=${DISTRO_ID:-?}); using Docker convenience script."
             curl -fsSL https://get.docker.com | sh
         fi
     fi
 
-    log INFO "Installing required dependencies…"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq vim rsync tar msmtp dnsutils openssl pigz
+    # Verify Docker availability
+    if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+        log ERROR "Docker installation did not complete successfully."
+        return 1
+    fi
 
-    # Make sure the daemon is running/enabled
+    # Ensure ancillary tools (best effort; only on apt-based systems)
+    if command -v apt-get >/dev/null 2>&1; then
+        log INFO "Installing common dependencies (jq, rsync, tar, msmtp-mta, dnsutils, openssl, pigz, vim)…"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            jq rsync tar msmtp-mta dnsutils openssl pigz vim || true
+    else
+        log WARN "apt-get not found; skipping ancillary package installation."
+    fi
+
+    # Enable/start docker via systemd when present
     if command -v systemctl >/dev/null 2>&1; then
         systemctl enable --now docker || true
     fi
 
-    local CURRENT_USER=${SUDO_USER:-$(whoami)}
+    # Add invoking user to docker group (effective after re-login)
+    local CURRENT_USER="${SUDO_USER:-$(id -un)}"
     if [[ "$CURRENT_USER" != "root" ]]; then
-        log INFO "Adding user '$CURRENT_USER' to the docker group…"
+        log INFO "Adding user '$CURRENT_USER' to the 'docker' group (you may need to log out/in)…"
         usermod -aG docker "$CURRENT_USER" || true
     fi
 
-    log INFO "Docker and dependencies installed."
+    # Quick version notes
+    log INFO "Docker version: $(docker --version 2>/dev/null || echo 'unknown')"
+    if docker compose version >/dev/null 2>&1; then
+        log INFO "Docker Compose v2: $(docker compose version 2>/dev/null | head -n1)"
+    else
+        log WARN "Docker Compose v2 not detected via 'docker compose'."
+    fi
+
+    log INFO "Docker and dependencies are ready."
+    return 0
 }
 
 ################################################################################
@@ -749,7 +809,13 @@ upload_backup_rclone() {
     require_cmd rclone || { UPLOAD_STATUS="FAIL"; return 1; }
 
     # Normalize remote (force one colon)
-    local REMOTE="${RCLONE_REMOTE%:}:"
+    local REMOTE
+    if [[ "$RCLONE_REMOTE" == *:* ]]; then
+        REMOTE="$RCLONE_REMOTE"
+    else
+        REMOTE="${RCLONE_REMOTE}:"
+    fi
+
     log INFO "Uploading backup files directly to remote root ($REMOTE)"
 
     if  rclone copyto "$BACKUP_DIR/$BACKUP_FILE" "$REMOTE/$BACKUP_FILE" "${RCLONE_FLAGS[@]}" \
@@ -1110,9 +1176,11 @@ backup_stack() {
         return 0
     fi
 
-    wait_for_containers_healthy 180 10 || return 1
+    wait_for_containers_healthy || return 1
 
-    verify_traefik_certificate "$DOMAIN" || return 1
+    if [[ "$BACKUP_REQUIRE_TLS" == "true" ]]; then
+        verify_traefik_certificate "$DOMAIN" || return 1
+    fi
 
     if do_local_backup; then
         BACKUP_STATUS="SUCCESS"
@@ -1320,6 +1388,10 @@ restore_stack() {
     log INFO "Cleaning existing Docker volumes before restore..."
     local vol
     for vol in "${RESTORE_VOLUMES[@]}"; do
+        if [[ "$vol" == "letsencrypt" ]]; then
+            log INFO "Skipping volume '$vol' (TLS certs) during restore."
+            continue
+        fi
         if docker volume inspect "$vol" >/dev/null 2>&1; then
             docker volume rm "$vol" && log INFO "Removed volume: $vol"
         else
@@ -1396,19 +1468,7 @@ restore_stack() {
 
     # When the PostgreSQL DB is ready, start other containers
     log INFO "Starting the rest of the stack..."
-    compose up -d || { log ERROR "docker compose up failed"; return 1; }
-
-    log INFO "Checking services running and healthy after restoring backup..."
-    if ! check_services_up_running; then
-        log ERROR "Some services and Traefik are not running or unhealthy after restoring the backup"
-        log ERROR "Restore the backup failed."
-        log INFO "Log File: $LOG_FILE"
-        return 1
-    else
-        log INFO "Services running and healthy"
-    fi
-
-    detect_mode_runtime || true
+    docker_up_check || { log ERROR "Stack unhealthy after restore."; return 1; }
 
     log INFO "Cleaning up..."
     rm -rf "$restore_dir"
@@ -1482,10 +1542,10 @@ cleanup_stack() {
 
     log INFO "Shutting down stack and removing orphans + anonymous volumes..."
     if [[ -f "$N8N_DIR/docker-compose.yml" ]]; then
-        compose down --remove-orphans || true
+        compose down --remove-orphans -v || true
     else
         log WARN "docker-compose.yml not found at \$N8N_DIR; attempting plain 'docker compose down' in $PWD."
-        docker compose down --remove-orphans || true
+        docker compose down --remove-orphans -v || true
     fi
 
     log INFO "Removing related volumes..."
