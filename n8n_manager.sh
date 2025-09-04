@@ -7,8 +7,8 @@ IFS=$'\n\t'
 # N8N Installation, Upgrade, Backup & Restore Manager (Mode-aware: Single or Queue)
 # Author:      TheNguyen
 # Email:       thenguyen.ai.automation@gmail.com
-# Version:     2.0.1
-# Date:        2025-08-30
+# Version:     2.0.0
+# Date:        2025-09-04
 #
 # Description:
 #   A unified management tool for installing, upgrading, backing up, and restoring the
@@ -113,6 +113,10 @@ DISCOVERED_MODE="unknown"
 
 declare -a RUNNING_CONTAINER_NAMES=()
 declare -A __SERVICE_TO_CONTAINER_HINT=()
+
+# ---------- Compose discovery cache ----------
+_DISCOVERY_SIG=""
+DISCOVERY_VALID=false
 
 # Defer detailed reporting to common on_error; also handle interrupts
 trap on_error ERR
@@ -233,7 +237,7 @@ set_paths() {
 #   - If Docker present → skip install.
 #   - Else add Docker apt repo & key, install engine + compose plugin.
 #   - Fallback to get.docker.com script if apt install fails.
-#   - Installs common dependencies (jq, rsync, tar, msmtp, rclone, dnsutils, openssl, pigz).
+#   - Installs common dependencies (jq, rsync, tar, msmtp, dnsutils, openssl, pigz).
 #   - Enables & starts docker via systemd if available.
 #   - Adds invoking user to docker group.
 #
@@ -269,7 +273,7 @@ install_prereqs() {
 
     log INFO "Installing required dependencies…"
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq vim rsync tar msmtp rclone dnsutils openssl pigz
+        jq vim rsync tar msmtp dnsutils openssl pigz
 
     # Make sure the daemon is running/enabled
     if command -v systemctl >/dev/null 2>&1; then
@@ -454,6 +458,8 @@ install_stack() {
     copy_templates_for_mode
     validate_compose_and_env
     load_env_file
+    discover_from_compose
+    ensure_external_volumes
     docker_up_check || { log ERROR "Stack unhealthy after install."; exit 1; }
     print_summary_message
 }
@@ -516,6 +522,7 @@ upgrade_stack() {
     compose down --remove-orphans || true
 
     validate_compose_and_env
+    discover_from_compose
     docker_up_check || { log ERROR "Stack unhealthy after upgrade."; exit 1; }
     print_summary_message
 }
@@ -536,7 +543,6 @@ upgrade_stack() {
 snapshot_bootstrap() {
     local snap="$BACKUP_DIR/snapshot"
     [[ -d "$snap" ]] || mkdir -p "$snap/volumes" "$snap/config"
-    discover_from_compose || return 0
 
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
@@ -636,7 +642,6 @@ is_changed_since_snapshot() {
 ################################################################################
 do_local_backup() {
     ensure_encryption_key || return 1
-    discover_from_compose || true
 
     local BACKUP_PATH="$BACKUP_DIR/backup_$DATE"
     mkdir -p "$BACKUP_PATH"
@@ -671,10 +676,15 @@ do_local_backup() {
     log INFO "Dumping PostgreSQL database..."
     local DB_USER="${DB_POSTGRESDB_USER:-${POSTGRES_USER:-n8n}}"
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
-    if docker exec "$POSTGRES_SERVICE" sh -c "pg_isready" &>/dev/null; then
-        docker exec "$POSTGRES_SERVICE" \
-            pg_dump -U "$DB_USER" -d "$DB_NAME" \
-            > "$BACKUP_PATH/n8n_postgres_dump_$DATE.sql" \
+    local pgcid; pgcid="$(container_id_for_service "$POSTGRES_SERVICE")"
+
+    if [[ -z "$pgcid" ]]; then
+        log ERROR "Postgres service '$POSTGRES_SERVICE' is not running"
+        return 1
+    fi
+
+    if docker exec "$pgcid" pg_isready &>/dev/null; then
+        docker exec "$pgcid" pg_dump -U "$DB_USER" -d "$DB_NAME" > "$BACKUP_PATH/n8n_postgres_dump_$DATE.sql" \
             || { log ERROR "Postgres dump failed"; return 1; }
         log INFO "Database dump saved to $BACKUP_PATH/n8n_postgres_dump_$DATE.sql"
     else
@@ -1084,7 +1094,7 @@ backup_stack() {
     BACKUP_FILE=""
     DRIVE_LINK=""
     load_env_file
-    discover_from_compose || true
+    discover_from_compose 
     snapshot_bootstrap
 
     if is_changed_since_snapshot; then
@@ -1093,6 +1103,7 @@ backup_stack() {
         ACTION="Backup (forced)"
     else
         ACTION="Skipped"; BACKUP_STATUS="SKIPPED"
+        log INFO "No changes detected; skipping backup. Use -f to force backup."
         write_summary_row "$ACTION" "$BACKUP_STATUS"
         send_mail_on_action
         summarize_backup
@@ -1280,7 +1291,7 @@ restore_stack() {
 
     # Reload restored .env so later steps (DOMAIN, etc.) reflect the restored config
     load_env_file
-    discover_from_compose || true
+    discover_from_compose
 
     # Stop and remove the current containers before cleaning volumes
     log INFO "Stopping and removing containers before restore..."
@@ -1326,9 +1337,12 @@ restore_stack() {
             return 1
         fi
         docker volume create "$vol" >/dev/null
+
         docker run --rm -v "${vol}:/data" -v "$restore_dir:/backup" alpine \
-            sh -c "rm -rf /data/* && tar xzf /backup/$(basename "$vol_file") -C /data" \
+            sh -c "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+            && tar xzf /backup/$(basename "$vol_file") -C /data" \
             || { log ERROR "Failed to restore $vol"; return 1; }
+
         log INFO "Volume $vol restored"
     done
 
@@ -1338,11 +1352,19 @@ restore_stack() {
     log INFO "Starting PostgreSQL first..."
     compose up -d "$POSTGRES_SERVICE" \
         || { log ERROR "Failed to start postgres"; return 1; }
+
     log INFO "Waiting for postgres to be healthy..."
-    check_container_healthy "postgres" || return 1
+    check_container_healthy "$POSTGRES_SERVICE" || return 1
 
     # Database
-    local PG_CONT="$POSTGRES_SERVICE"
+    local PG_CID
+    PG_CID="$(container_id_for_service "$POSTGRES_SERVICE")"
+    if [[ -z "$PG_CID" ]]; then
+        log ERROR "Could not resolve container ID for service '$POSTGRES_SERVICE'"
+        return 1
+    fi
+
+    # Database variables
     local DB_USER="${DB_POSTGRESDB_USER:-${POSTGRES_USER:-n8n}}"
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
     local POSTGRES_RESTORE_MODE=""
@@ -1351,21 +1373,21 @@ restore_stack() {
         POSTGRES_RESTORE_MODE="dump"
         log INFO "Custom dump found: $(basename "$dump_file"). Restoring via pg_restore..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
-        docker exec -i "$PG_CONT" pg_restore -U "$DB_USER" -d "${DB_NAME}" -c -v < "$dump_file"
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        docker exec -i "$PG_CID" pg_restore -U "$DB_USER" -d "${DB_NAME}" -c -v < "$dump_file"
 
     elif [[ -n "$sql_file" ]]; then
         POSTGRES_RESTORE_MODE="dump"
         log INFO "SQL dump found: $(basename "$sql_file"). Restoring via psql..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
-        docker exec -i "$PG_CONT" psql -U "$DB_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        docker exec -i "$PG_CID" psql -U "$DB_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
 
     else
         POSTGRES_RESTORE_MODE="volume"
@@ -1385,6 +1407,8 @@ restore_stack() {
     else
         log INFO "Services running and healthy"
     fi
+
+    detect_mode_runtime || true
 
     log INFO "Cleaning up..."
     rm -rf "$restore_dir"
@@ -1438,7 +1462,7 @@ restore_stack() {
 #   0 on completion; 0 if user cancels; non-zero only on unexpected errors.
 ################################################################################
 cleanup_stack() {
-    discover_from_compose || true
+    discover_from_compose
     # Settings (can be overridden via env)
     local NETWORK_NAME="${NETWORK_NAME:-n8n-network}"
     local KEEP_CERTS="${KEEP_CERTS:-true}"
@@ -1600,13 +1624,13 @@ parse_args() {
 
     # Enforce single action
     local count=0
-    $DO_INSTALL   && ((count++))
-    $DO_UPGRADE   && ((count++))
-    $DO_BACKUP    && ((count++))
-    $DO_RESTORE   && ((count++))
-    $DO_CLEANUP   && ((count++))
-    $DO_AVAILABLE && ((count++))
-    ((count==1)) || { log ERROR "Choose exactly one action."; usage; }
+    $DO_INSTALL   && ((count+=1))
+    $DO_UPGRADE   && ((count+=1))
+    $DO_BACKUP    && ((count+=1))
+    $DO_RESTORE   && ((count+=1))
+    $DO_CLEANUP   && ((count+=1))
+    $DO_AVAILABLE && ((count+=1))
+    (( count == 1 )) || { log ERROR "Choose exactly one action."; usage; }
 
     # Normalize mode default for install
     if $DO_INSTALL; then

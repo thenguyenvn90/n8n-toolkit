@@ -1,10 +1,9 @@
 services:
   traefik:
     image: traefik:v2.11
-    container_name: traefik
     restart: unless-stopped
     command:
-      - "--api.dashboard=false"
+      - "--api.dashboard=true"
       # EntryPoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -34,7 +33,7 @@ services:
     networks:
       - n8n-network
     healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
       interval: 10s
       timeout: 5s
       start_period: 20s
@@ -42,7 +41,6 @@ services:
 
   postgres:
     image: postgres:14
-    container_name: postgres
     restart: unless-stopped
     env_file:
       - .env
@@ -57,9 +55,8 @@ services:
       start_period: 20s
       retries: 5
 
-  n8n:
+  main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
-    container_name: n8n
     restart: unless-stopped
     env_file:
       - .env
@@ -81,20 +78,21 @@ services:
       retries: 5
     labels:
       - "traefik.enable=true"
+      - traefik.docker.network=n8n-network
       # Router & TLS
       - "traefik.http.routers.n8n.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=le"
-      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      - "traefik.http.services.n8n.loadbalancer.server.port=${N8N_PORT:-5678}"
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
       # Security headers (name: n8n-headers)
-      - "traefik.http.middlewares.n8n-headers.headers.STSSeconds=315360000"
-      - "traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
+      - "traefik.http.middlewares.n8n-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true"
       - "traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true"
-      - "traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true"
-      - "traefik.http.middlewares.n8n-headers.headers.STSPreload=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsPreload=true"
       # Rate limiting (tune as needed)
       - "traefik.http.middlewares.n8n-rate.ratelimit.average=100"
       - "traefik.http.middlewares.n8n-rate.ratelimit.burst=50"
@@ -105,6 +103,7 @@ services:
 
 networks:
   n8n-network:
+    name: n8n-network
     driver: bridge
 
 volumes:

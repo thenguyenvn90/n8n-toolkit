@@ -1,10 +1,9 @@
 services:
   traefik:
     image: traefik:v2.11
-    container_name: traefik
     restart: unless-stopped
     command:
-      - "--api.dashboard=false"
+      - "--api.dashboard=true"
       # EntryPoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -35,7 +34,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
       interval: 10s
       timeout: 5s
       start_period: 10s
@@ -43,7 +42,6 @@ services:
 
   postgres:
     image: postgres:14
-    container_name: postgres
     restart: unless-stopped
     env_file:
       - .env
@@ -61,7 +59,6 @@ services:
 
   redis:
     image: redis:7
-    container_name: redis
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${STRONG_PASSWORD}"]
     networks: [n8n-network]
@@ -77,9 +74,8 @@ services:
       retries: 5
 
   # Main (UI, schedules, webhooks)
-  n8n-main:
+  main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
-    container_name: n8n-main
     restart: unless-stopped
     env_file:
       - .env
@@ -126,7 +122,7 @@ services:
       - no-new-privileges:true
 
   # External Task Runner for n8n-main
-  n8n-runner-main:
+  runner-main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
     restart: unless-stopped
     env_file:
@@ -134,14 +130,16 @@ services:
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
     depends_on:
-      n8n-main:
+      main:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks: [n8n-network]
     security_opt:
       - no-new-privileges:true
 
   # Worker(s) – scale horizontally
-  n8n-worker:
+  worker:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file:
@@ -161,6 +159,7 @@ services:
 
 networks:
   n8n-network:
+    name: n8n-network
     driver: bridge
 
 volumes:
