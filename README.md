@@ -11,15 +11,16 @@ Everything is driven by one script: `n8n_manager.sh`.
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-  - [Get the Code](#get-the-code)
+  - [Get the Repository](#get-the-repository)
   - [CLI Overview](#cli-overview)
   - [Install (Single or Queue Mode)](#install-single-or-queue-mode)
   - [Upgrade](#upgrade)
-  - [Back up](#back-up)
+  - [Backup](#backup)
   - [Restore](#restore)
   - [Cleanup](#cleanup)
-- [Queue Mode Basics](#queue-mode-basics)
+- [Queue Mode knowledge](#queue-mode-knowledge)
 - [Scheduling Daily Backups](#scheduling-daily-backups)
+- [Where to check logs](#where-to-check-logs)
 - [Logs & Health](#logs--health)
 - [Troubleshooting & FAQs](#troubleshooting--faqs)
 - [Security Notes](#security-notes)
@@ -29,14 +30,17 @@ Everything is driven by one script: `n8n_manager.sh`.
 
 ## Highlights
 
-- **One script, all tasks** — install, upgrade, backup/restore, cleanup.
-- **Mode-aware** — deploy either **Single** or **Queue** mode; upgrades auto-detect the current mode.
-- **Secure by default** — Traefik + Let’s Encrypt, strong secrets, HTTPS everywhere.
-- **Resilient data** — PostgreSQL database, persistent volumes, deterministic restores.
-- **Change detection** — backups skip when nothing changed (use `-f` to force).
-- **Optional cloud uploads** — send archives to Google Drive (or any `rclone` remote).
-- **Email notifications** — Gmail SMTP via `msmtp` (attach logs on failure; optional on success).
-- **Self-healing checks** — health checks for services, TLS verification (optional).
+- **One script, all tasks** — install, upgrade, backup/restore, and cleanup in a single CLI.
+- **Mode-aware** — deploy **Single** or **Queue** mode; upgrades auto-detect the current mode.
+- **Secure by default** — Traefik + Let’s Encrypt (auto-renew), strong secrets, HTTPS everywhere.
+- **Resilient data** — PostgreSQL + persistent volumes; deterministic restores preserve workflows & credentials.
+- **Smart version picker** — lists latest stable (or newer-than-current when running) with image tag validation.
+- **Change-aware backups** — skip when nothing changed (use `-f` to force).
+- **Fast, verifiable archives** — compression with `pigz` when available and SHA-256 checksums; retention pruning built-in.
+- **One-command restore** — from local file or any `rclone` remote; deterministic DB rebuild (SQL dump or volume) and post-restore health checks.
+- **Off-site ready** — upload archives & checksums to Google Drive or any `rclone` remote, with remote pruning.
+- **Email notifications** — Gmail SMTP via `msmtp`; attach logs on failure (optional on success).
+- **Strong UX & logging** — per-run logs under `logs/`, `--log-level DEBUG` tracing, graceful error/interrupt traps, and a rolling `backups/backup_summary.md` dashboard.
 
 ---
 
@@ -63,36 +67,52 @@ Everything is driven by one script: `n8n_manager.sh`.
 
 ## Prerequisites
 
-- **Ubuntu/Debian** server (root or sudo).
-- **Domain/subdomain** pointing to this server’s **public IP**.
-- **Open ports**: **80** and **443**.
-- **Recommended resources**: min **1 vCPU / 2 GB RAM** (Single); **2 vCPU / 4 GB RAM**+ for Queue.
-- **Email for SSL** (Let’s Encrypt) — e.g., `you@example.com`.
+1. **Linux Server** — Ubuntu 20.04+ or Debian with root (or sudo) access.  
+2. **Domain/Subdomain** — e.g. `n8n.example.com`.  
+3. **DNS A Record** — point your domain to the server’s public IP and let it propagate.  
+4. **Open Ports** — allow **80** (HTTP) and **443** (HTTPS).  
+5. **Email Address** — for Let’s Encrypt (e.g., `you@company.com`).  
+6. **Recommended sizing & worker strategy**
 
-> The script auto-installs Docker Engine & Compose v2 (APT repo when possible; otherwise Docker’s convenience script). It also installs `jq`, `rsync`, `tar`, `msmtp-mta`, `dnsutils`, `openssl`, `pigz`, and `vim` on apt-based systems.
+| VPS (vCPU / RAM)   | Suggestion                         |
+|--------------------|------------------------------------|
+| **1 vCPU / 2 GB**  | 1 worker @ concurrency **3–5**     |
+| **2 vCPU / 4 GB**  | 1–2 workers @ concurrency **5**    |
+| **4 vCPU / 8 GB**  | 2 workers @ concurrency **8**      |
+| **8+ vCPU / 16+ GB** | 3–4 workers @ concurrency **8–10** |
 
 ---
 
 ## Quick Start
 
-### Get the Code
+### Get the Repository
 
-**Option A — Git**
+You can set up this project in **two different ways**, depending on your experience:
+
+#### Option 1 — For developers (using Git)
+If you already have `git` installed and are comfortable with it:
+
 ```bash
-git clone https://github.com/<your-org-or-user>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/thenguyenvn90/n8n-toolkit.git
+cd n8n-toolkit
 chmod +x *.sh
 ```
 
-**Option B — ZIP (no git)**
+#### Option 2 — For non-tech users (download as ZIP)
+If you don’t use Git, you can just download the code directly:
+
 ```bash
-sudo apt-get update && sudo apt-get install -y unzip
-curl -L -o n8n.zip https://github.com/<your-org-or-user>/<your-repo>/archive/refs/heads/main.zip
-unzip n8n.zip
-cd <your-repo>-main
+# Install unzip if not available
+sudo apt install -y unzip
+
+# Download and extract
+curl -L -o n8n-toolkit.zip https://github.com/thenguyenvn90/n8n-toolkit/archive/refs/heads/main.zip
+unzip n8n-toolkit.zip
+cd n8n-toolkit-main
 chmod +x *.sh
 ```
-> GitHub ZIPs append `-main` to the folder name.
+
+Note: After unzipping, GitHub appends -main to the folder name. Instead of n8n-toolkit/, the folder will be called n8n-toolkit-main/.
 
 ---
 
@@ -154,12 +174,12 @@ sudo ./n8n_manager.sh --install n8n.example.com -m you@example.com --mode queue 
 
 What happens:
 
-1. DNS check: confirms `DOMAIN` resolves to this host.  
-2. Installs Docker/Compose v2 if missing.  
-3. Copies the template (`single-mode/` or `queue-mode/`) into your target dir.  
-4. Pins **n8n version**, **domain**, **SSL email**; generates **STRONG_PASSWORD** and **N8N_ENCRYPTION_KEY** if needed.  
-5. Brings the stack up; waits for health and TLS.  
-6. Prints a full summary with paths and logs.
+- DNS check: confirms `DOMAIN` resolves to this host.  
+- Installs Docker/Compose v2 if missing.  
+- Copies the template (`single-mode/` or `queue-mode/`) into your target dir.  
+- Pins **n8n version**, **domain**, **SSL email**; generates **STRONG_PASSWORD** and **N8N_ENCRYPTION_KEY**.  
+- Create **volumes** and start the stack behind Traefik.
+- Prints a full summary with paths and logs.
 
 ---
 
@@ -182,25 +202,99 @@ sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.107.3
 
 **Downgrade or force redeploy of the same version:**
 ```bash
-sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.105.3 -f
+sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.107.2 -f
 ```
 
-Notes:
+**Notes:**
 
 - Upgrades **auto-detect** whether your stack is single or queue mode (no flag needed).  
-- `-v` pins the `.env` `N8N_IMAGE_TAG` and redeploys.  
-- Without `-v`, upgrades to **latest stable**.
+- If you **omit `-v`** (or pass `latest`), the script resolves the latest stable tag and updates `.env` to that version.
+- If you **pass `-v <version>`**, the script validates the tag, pins it in `.env`, and deploys that exact version.
+- A later `-u` **without `-v`** will switch you back to the latest stable.
+- Use `-d /path/to/n8n` to upgrade an existing n8n installation in the specified directory.
 
 ---
 
-### Back up
+### Backup
 
 Backups include:
 
-- Volumes: `n8n-data`, `postgres-data`, `letsencrypt`  
-- PostgreSQL dump (DB and user discovered from `.env`)  
+- Backs up Docker **volumes**: `n8n-data`, `postgres-data`, `letsencrypt`
+- Creates a **PostgreSQL dump** (from the `postgres` container, DB `n8n`)
 - Copies of `.env` and `docker-compose.yml`  
-- Change detection via a snapshot to skip identical runs (use `-f` to force)
+- **Skips** backup automatically if nothing has changed (unless you force it)
+- Keeps a rolling **30‑day summary** in `backups/backup_summary.md`
+- Optionally **uploads** backups to **Google Drive** via `rclone`
+- Sends **email alerts** through Gmail SMTP (**msmtp**) — with the log file attached on failures (and optionally on success)
+
+Requirements (one‑time):
+
+- **Install the tools the script needs (Ubuntu/Debian)**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io rsync tar msmtp-mta rclone dnsutils curl openssl
+```
+
+- **Check your `.env` file contains `N8N_ENCRYPTION_KEY`**  
+  n8n uses an encryption key to protect stored credentials. This key is critical for **backup and restore**.  
+
+  - If you already set `N8N_ENCRYPTION_KEY` in your `.env`, you’re good.  
+  - If not, n8n auto-generated one inside the main container on first run.  
+
+Retrieve it with:  
+```bash
+docker exec -it $(docker ps --format '{{.Names}}' | grep -E '^n8n($|-)' | head -n 1) \
+cat /home/node/.n8n/config | grep -oP '(?<="encryptionKey": ")[^"]+'
+```
+
+This will print the raw key, for example:
+```bash
+oZ+XKX2XpGuOgBLj+YyaOlcS8JgKkkE
+```
+
+- **Copy this into your .env file so it is persistent:**
+```bash
+N8N_ENCRYPTION_KEY=oZ+XKX2XpGuOgBLj+YyaOlcS8JgKkkE
+```
+
+Email notifications (optional but recommended):
+
+The script uses **Gmail via msmtp**. Set two environment variables before running:
+
+```bash
+export SMTP_USER="youraddress@gmail.com"
+export SMTP_PASS="your_app_password"   # Use a Gmail App Password (see below)
+```
+
+- **Gmail App Password:**\
+  In your Google Account → Security → 2‑Step Verification → **App passwords** → create one (choose “Mail”, device “Other”).\
+  Paste that 16-character password into `SMTP_PASS`.
+
+- Where do emails go? Pass a recipient with `-e you@example.com`.
+
+---
+
+Google Drive uploads (optional):
+
+1. Configure `rclone` once:
+
+```bash
+rclone config      # create a remote, e.g., name it: gdrive-user
+```
+
+During `rclone config`, pick **Google Drive**, authorize, and finish.
+
+2. Choose your target folder name in Drive (e.g., `n8n-backups`).\
+   The script will upload into that folder under the remote you select.
+
+You’ll pass these when running:
+
+- `-s gdrive-user` (remote name)
+
+> Tip: Verify the path with `rclone lsd gdrive-user:` and `rclone ls gdrive-user:n8n-backups`.
+
+Backup scenarios:
 
 **Local backup, no upload, no emails:**
 ```bash
@@ -225,11 +319,12 @@ sudo ./n8n_manager.sh -b -s gdrive:/n8n-backups -e ops@example.com
 sudo ./n8n_manager.sh -b -s gdrive:/n8n-backups -e ops@example.com -n
 ```
 
-Artifacts:
+What to expect after a backup:
 
-- `backups/n8n_backup_<VERSION>_<YYYY-MM-DD_HH-MM-SS>.tar.gz`  
+- Backup files: in `backups/`, named like\
+  `n8n_backup_<N8N_VERSION>_<YYYY-MM-DD_HH-MM-SS>.tar.gz` 
 - Matching `.sha256` checksum  
-- Rolling 30-day log: `backups/backup_summary.md`  
+- Summary file: `backups/backup_summary.md` tracks daily history (last 30 days kept)
 - Snapshot for change detection: `backups/snapshot/`  
 - Local retention: **7 days** (archives + checksums)  
 - Remote retention: **7 days** (pattern-based prune)
@@ -278,72 +373,62 @@ Interactive plan to:
 
 ---
 
-## Queue Mode Basics
+## Queue Mode knowledge
 
-**Why:** Separate UI/API/webhooks from execution to keep the editor responsive and scale executions horizontally.
-
-**Architecture (Queue Mode):**
-
-- `n8n-main` — UI, API, webhooks, schedules, queues jobs  
-- `redis` — BullMQ queue backend  
-- `n8n-worker`(s) — run workflow executions (scale horizontally)  
-- `postgres` — workflows, credentials, executions  
-- `traefik` — TLS & reverse proxy
-
-**Common ops:**
-```bash
-# See queue mode is active
-docker exec -it n8n-main printenv | grep EXECUTIONS_MODE  # => EXECUTIONS_MODE=queue
-
-# Scale workers
-docker compose up -d --scale n8n-worker=2
-
-# Check health quickly
-docker compose ps --format "table {{.Name}}\t{{.Status}}"
-docker compose logs -f n8n-worker
-```
-
-**Sizing guidelines (starting points):**
-
-| VPS (vCPU/RAM) | Workers x Concurrency |
-|---|---|
-| 1 / 2 GB | 1 × 3–5 |
-| 2 / 4 GB | 1–2 × 5 |
-| 4 / 8 GB | 2 × 8 |
-| 8+ / 16+ GB | 3–4 × 8–10 |
-
-> Prefer **more workers** before making a single worker’s concurrency too high.
+👉 For detailed about queue mode, see the full guide: [**n8n-queue-mode**](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)
 
 ---
 
 ## Scheduling Daily Backups
 
-### Cron (02:00 every day)
+Here are two easy ways to run your backup every day automatically.
 
-Create a small wrapper:
+1. Use cron (example: **2:00 AM** daily):
+
+- Create a tiny wrapper script so cron has everything it needs:
 
 ```bash
-sudo tee /usr/local/bin/n8n-daily-backup <<'EOF'
+sudo mkdir -p /opt/n8n-toolkit/logs
+sudo tee /opt/n8n-toolkit/run_backup.sh >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/n8n
-export SMTP_USER="you@example.com"
-export SMTP_PASS="your_gmail_app_password"
-# Upload to Drive and email on failure; also email on success (optional)
- /home/n8n/n8n_manager.sh -b -s gdrive:/n8n-backups -e you@example.com --notify-on-success \
-  >> /home/n8n/logs/cron-backup.log 2>&1
+# Gmail for notifications (optional)
+export SMTP_USER="you@YourDomain.com"
+export SMTP_PASS="your_app_password"   # Gmail App Password
+# Run backup for the deployed n8n dir
+/opt/n8n-toolkit/n8n_manager.sh -b -d /home/n8n -s gdrive:/n8n-backups -e you@YourDomain.com --notify-on-success >> /opt/n8n-toolkit/logs/cron.log 2>&1
 EOF
-sudo chmod +x /usr/local/bin/n8n-daily-backup
+sudo chmod +x /opt/n8n-toolkit/run_backup.sh
 ```
 
-Add to root’s crontab:
+- Schedule it daily at 02:00 (server’s local time)
+
+Use **cron**
+```bash
+crontab -e
+```
+
+Add:
 ```cron
-0 2 * * * /usr/local/bin/n8n-daily-backup
+0 2 * * * /opt/n8n-toolkit/run_backup.sh
 ```
 
-### systemd timer (02:05 daily)
+- Want a weekly forced backup as well? Add this extra line to force on Sundays:
 
-Service:
+```cron
+15 2 * * 0 /opt/n8n-toolkit/run_backup.sh
+```
+---
+
+- Check if the crontab was set up correctly:
+```cron
+crontab -l
+```
+
+2. Use systemd timer (resilient & survives reboots)
+
+- Craete Service unit (/etc/systemd/system/n8n-backup.service)
+
 ```bash
 sudo tee /etc/systemd/system/n8n-backup.service >/dev/null <<'EOF'
 [Unit]
@@ -351,16 +436,16 @@ Description=n8n daily backup
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/n8n
-Environment=SMTP_USER=you@example.com
-Environment=SMTP_PASS=your_gmail_app_password
-ExecStart=/home/n8n/n8n_manager.sh -b -s gdrive:/n8n-backups -e you@example.com --notify-on-success
-StandardOutput=append:/home/n8n/logs/systemd-backup.log
-StandardError=append:/home/n8n/logs/systemd-backup.log
+WorkingDirectory=/opt/n8n-toolkit
+Environment=SMTP_USER=you@YourDomain.com
+Environment=SMTP_PASS=your_app_password
+ExecStart=/opt/n8n-toolkit/n8n_manager.sh -b -d /home/n8n -s gdrive:/n8n-backups -e you@YourDomain.com --notify-on-success
+StandardOutput=append:/opt/n8n-toolkit/logs/systemd-backup.log
+StandardError=append:/opt/n8n-toolkit/logs/systemd-backup.log
 EOF
 ```
+- Create the timer (runs 02:05 daily and catches missed runs after reboot):
 
-Timer:
 ```bash
 sudo tee /etc/systemd/system/n8n-backup.timer >/dev/null <<'EOF'
 [Unit]
@@ -374,10 +459,40 @@ Unit=n8n-backup.service
 [Install]
 WantedBy=timers.target
 EOF
+```
 
+- Enable & start the timer:
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now n8n-backup.timer
+systemctl list-timers | grep n8n-backup
 ```
+- Check status & logs
+
+```bash
+systemctl list-timers | grep n8n-backup
+journalctl -u n8n-backup.service --no-pager -n 200
+tail -n 200 /root/n8n/logs/systemd-backup.log
+```
+
+**Remote cleanup:** files older than **7 days** are deleted from the target folder:
+
+```bash
+rclone delete --min-age 7d gdrive-user:n8n-backups
+```
+
+(The script runs automatically after each upload.)
+
+---
+
+## Where to check logs
+
+- **Latest run:** printed on screen and written to `logs/`:
+  - Backup: `logs/backup_n8n_<YYYY-MM-DD_HH-MM-SS>.log`
+  - Restore: `logs/restore_n8n_<YYYY-MM-DD_HH-MM-SS>.log`
+- **Email attachment:** on failures (and on success if `-n`), the log file is attached to the email.
+
 
 ---
 
@@ -431,8 +546,8 @@ We already exclude noisy Postgres dirs (`pg_wal`, `pg_stat_tmp`, `pg_logical`), 
 The backup’s `.env.bak` must contain `N8N_ENCRYPTION_KEY`. If it’s missing or different, encrypted credentials from old backups cannot be decrypted.
 
 **Queue Mode jobs stuck in “Waiting”.**  
-- Check Redis health: `docker compose exec redis redis-cli ping` → `PONG`  
-- Ensure workers are running: `docker compose ps` and `docker compose logs -f n8n-worker`  
+- Check Redis health: `docker compose exec n8n-redis-1 redis-cli ping` → `PONG`  
+- Ensure workers are running: `docker compose ps` and `docker compose logs -f n8n-worker-1`  
 - If Redis auth is enabled in compose, ensure `.env` contains the same password.
 
 ---
@@ -450,5 +565,3 @@ The backup’s `.env.bak` must contain `N8N_ENCRYPTION_KEY`. If it’s missing o
 
 - Open an issue in the repository, or  
 - Email **thenguyen.ai.automation@gmail.com**
-
-Happy automating! 🚀
