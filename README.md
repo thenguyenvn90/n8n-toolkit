@@ -1,4 +1,4 @@
-# n8n Manager — Install • Upgrade • Backup/Restore (Single or Queue Mode)
+# n8n Manager — Install • Upgrade • Backup • Restore (Single or Queue Mode)
 
 A production-ready way to **install**, **upgrade**, **back up**, and **restore** a self-hosted [n8n](https://n8n.io) stack on Docker — with **Traefik** (HTTPS & reverse proxy), **PostgreSQL** (persistence), and optional **Queue Mode** (Redis + workers).  
 Everything is driven by one script: `n8n_manager.sh`.
@@ -226,75 +226,6 @@ Backups include:
 - Keeps a rolling **30‑day summary** in `backups/backup_summary.md`
 - Optionally **uploads** backups to **Google Drive** via `rclone`
 - Sends **email alerts** through Gmail SMTP (**msmtp**) — with the log file attached on failures (and optionally on success)
-
-Requirements (one‑time):
-
-- **Install the tools the script needs (Ubuntu/Debian)**
-
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io rsync tar msmtp-mta rclone dnsutils curl openssl
-```
-
-- **Check your `.env` file contains `N8N_ENCRYPTION_KEY`**  
-  n8n uses an encryption key to protect stored credentials. This key is critical for **backup and restore**.  
-
-  - If you already set `N8N_ENCRYPTION_KEY` in your `.env`, you’re good.  
-  - If not, n8n auto-generated one inside the main container on first run.  
-
-Retrieve it with:  
-```bash
-docker exec -it $(docker ps --format '{{.Names}}' | grep -E '^n8n($|-)' | head -n 1) \
-cat /home/node/.n8n/config | grep -oP '(?<="encryptionKey": ")[^"]+'
-```
-
-This will print the raw key, for example:
-```bash
-oZ+XKX2XpGuOgBLj+YyaOlcS8JgKkkE
-```
-
-- **Copy this into your .env file so it is persistent:**
-```bash
-N8N_ENCRYPTION_KEY=oZ+XKX2XpGuOgBLj+YyaOlcS8JgKkkE
-```
-
-Email notifications (optional but recommended):
-
-The script uses **Gmail via msmtp**. Set two environment variables before running:
-
-```bash
-export SMTP_USER="youraddress@gmail.com"
-export SMTP_PASS="your_app_password"   # Use a Gmail App Password (see below)
-```
-
-- **Gmail App Password:**\
-  In your Google Account → Security → 2‑Step Verification → **App passwords** → create one (choose “Mail”, device “Other”).\
-  Paste that 16-character password into `SMTP_PASS`.
-
-- Where do emails go? Pass a recipient with `-e you@example.com`.
-
----
-
-Google Drive uploads (optional):
-
-1. Configure `rclone` once:
-
-```bash
-rclone config      # create a remote, e.g., name it: gdrive-user
-```
-
-During `rclone config`, pick **Google Drive**, authorize, and finish.
-
-2. Choose your target folder name in Drive (e.g., `n8n-backups`).\
-   The script will upload into that folder under the remote you select.
-
-You’ll pass these when running:
-
-- `-s gdrive-user` (remote name)
-
-> Tip: Verify the path with `rclone lsd gdrive-user:` and `rclone ls gdrive-user:n8n-backups`.
-
-Backup scenarios:
 
 **Local backup, no upload, no emails:**
 ```bash
