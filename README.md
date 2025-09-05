@@ -58,6 +58,11 @@ Everything is driven by one script: `n8n_manager.sh`.
 │   └── .env                       # Template env for queue mode
 └── (created at runtime)
     ├── /home/n8n/logs/            # All run logs (or your chosen --dir)
+    │   ├── install_n8n_<ts>.log
+    │   ├── upgrade_n8n_<ts>.log
+    │   ├── backup_n8n_<ts>.log
+    │   ├── restore_n8n_<ts>.log
+    │   └── latest_<action>.log    # symlink per action (install/upgrade/backup/restore/cleanup)
     └── /home/n8n/backups/         # Backup archives, checksums, summary, snapshot
 ```
 
@@ -103,7 +108,7 @@ If you don’t use Git, you can just download the code directly:
 
 ```bash
 # Install unzip if not available
-sudo apt install -y unzip
+sudo apt update && sudo apt install -y unzip
 
 # Download and extract
 curl -L -o n8n-toolkit.zip https://github.com/thenguyenvn90/n8n-toolkit/archive/refs/heads/main.zip
@@ -181,6 +186,37 @@ What happens:
 - Create **volumes** and start the stack behind Traefik.
 - Prints a full summary with paths and logs.
 
+Example logs for single mode:
+
+```
+═════════════════════════════════════════════════════════════
+N8N has been successfully installed!
+Installation Mode:       single
+Domain:                  https://n8n.example.com
+Installed Version:       1.110.1
+Install Timestamp:       2025-09-04_14-35-55
+Installed By:            root
+Target Directory:        /home/n8n
+SSL Email:               thenguyen.ai.automation@gmail.com
+Execution log:           /home/n8n/logs/install_n8n_2025-09-04_14-35-55.log
+═════════════════════════════════════════════════════════════
+```
+
+Example logs for queue mode:
+
+```
+═════════════════════════════════════════════════════════════
+N8N has been successfully installed!
+Installation Mode:       queue
+Domain:                  https://n8n.example.com
+Installed Version:       1.110.1
+Install Timestamp:       2025-09-04_15-23-17
+Installed By:            root
+Target Directory:        /home/n8n
+SSL Email:               thenguyen.au.automation@gmail.com
+Execution log:           /home/n8n/logs/install_n8n_2025-09-04_15-23-17.log
+═════════════════════════════════════════════════════════════
+```
 ---
 
 ### Upgrade
@@ -214,7 +250,20 @@ sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.107.2 -f
 - Use `-d /path/to/n8n` to upgrade an existing n8n installation in the specified directory.
 
 ---
+Example logs for upgrade:
 
+```
+═════════════════════════════════════════════════════════════
+N8N has been successfully upgraded!
+Detected Mode:           queue
+Domain:                  https://n8n.example.com
+Upgraded Version:        1.110.1
+Upgraded Timestamp:      2025-09-04_15-26-26
+Upgraded By:             root
+Target Directory:        /home/n8n
+Execution log:           /home/n8n/logs/upgrade_n8n_2025-09-04_15-26-26.log
+═════════════════════════════════════════════════════════════
+```
 ### Backup
 
 Backups include:
@@ -262,6 +311,25 @@ What to expect after a backup:
 
 > Optional TLS gate: set `BACKUP_REQUIRE_TLS=true` in your environment to require a valid Traefik certificate before a backup proceeds.
 
+Example logs for backup:
+
+```
+═════════════════════════════════════════════════════════════
+Backup completed!
+Detected Mode:           single
+Domain:                  https://n8n.example.com
+Backup Action:           Backup (forced)
+Backup Status:           SUCCESS
+Backup Timestamp:        2025-09-04_15-20-02
+Backup file:             /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_15-20-02.tar.gz
+N8N Version:             1.110.1
+N8N Directory:           /home/n8n
+Log File:                /home/n8n/logs/backup_n8n_2025-09-04_15-20-02.log
+Daily tracking:          /home/n8n/backups/backup_summary.md
+Remote upload:           SKIPPED
+Email notification:      SKIPPED (not requested)
+═════════════════════════════════════════════════════════════
+```
 ---
 
 ### Restore
@@ -287,6 +355,22 @@ What restore does:
 
 > ⚠️ The **same** `N8N_ENCRYPTION_KEY` must be present during restore, otherwise stored credentials cannot be decrypted.
 
+Example logs for restore:
+```
+═════════════════════════════════════════════════════════════
+Restore completed successfully.
+Detected Mode:           single
+Domain:                  https://n8n.example.com
+Restore from file:       /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_14-50-40.tar.gz
+Local archive used:      /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_14-50-40.tar.gz
+Restore Timestamp:       2025-09-04_15-20-51
+N8N Version:             1.110.1
+N8N Directory:           /home/n8n
+Log File:                /home/n8n/logs/restore_n8n_2025-09-04_15-20-51.log
+Volumes restored:        letsencrypt, n8n-data
+PostgreSQL:              Restored from SQL dump
+═════════════════════════════════════════════════════════════
+```
 ---
 
 ### Cleanup
@@ -306,7 +390,7 @@ Interactive plan to:
 
 ## Queue Mode knowledge
 
-👉 For detailed about queue mode, see the full guide: [**n8n-queue-mode**](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)
+👉 For details about queue mode, see the full guide: [**n8n-queue-mode**](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)
 
 ---
 
@@ -358,7 +442,7 @@ crontab -l
 
 2. Use systemd timer (resilient & survives reboots)
 
-- Craete Service unit (/etc/systemd/system/n8n-backup.service)
+- Create Service unit (/etc/systemd/system/n8n-backup.service)
 
 ```bash
 sudo tee /etc/systemd/system/n8n-backup.service >/dev/null <<'EOF'
@@ -404,7 +488,7 @@ systemctl list-timers | grep n8n-backup
 ```bash
 systemctl list-timers | grep n8n-backup
 journalctl -u n8n-backup.service --no-pager -n 200
-tail -n 200 /root/n8n/logs/systemd-backup.log
+tail -n 200 /opt/n8n-toolkit/logs/systemd-backup.log
 ```
 
 **Remote cleanup:** files older than **7 days** are deleted from the target folder:
@@ -417,20 +501,11 @@ rclone delete --min-age 7d gdrive-user:n8n-backups
 
 ---
 
-## Where to check logs
-
-- **Latest run:** printed on screen and written to `logs/`:
-  - Backup: `logs/backup_n8n_<YYYY-MM-DD_HH-MM-SS>.log`
-  - Restore: `logs/restore_n8n_<YYYY-MM-DD_HH-MM-SS>.log`
-- **Email attachment:** on failures (and on success if `-n`), the log file is attached to the email.
-
-
----
-
 ## Logs & Health
 
 - **Run logs** (manager): `logs/` under your target dir (default `/home/n8n/logs/`)  
-  - `manager_n8n_<timestamp>.log`, `backup_n8n_<timestamp>.log`, `restore_n8n_<timestamp>.log`  
+  - `install_n8n_<timestamp>.log`, `upgrade_n8n_<timestamp>.log`, `backup_n8n_<timestamp>.log`, `restore_n8n_<timestamp>.log`, `cleanup_n8n_<timestamp>.log`, symlink `latest_<mode>.log`.
+
 - **Containers:**
   ```bash
   docker compose -f /home/n8n/docker-compose.yml ps

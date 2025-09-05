@@ -104,21 +104,6 @@ UPLOAD_STATUS=""
 BACKUP_FILE=""
 DRIVE_LINK=""
 
-# Auto-discovery caches (shadowed locally to avoid collisions)
-declare -a DISCOVERED_SERVICES=()
-declare -a DISCOVERED_VOLUMES=()
-declare -a DISCOVERED_VOLUME_EXTERNAL=()
-declare -a DISCOVERED_CONTAINER_NAMES=()
-
-DISCOVERED_MODE="unknown"
-
-declare -a RUNNING_CONTAINER_NAMES=()
-declare -A __SERVICE_TO_CONTAINER_HINT=()
-
-# ---------- Compose discovery cache ----------
-_DISCOVERY_SIG=""
-DISCOVERY_VALID=false
-
 # Defer detailed reporting to common on_error; also handle interrupts
 trap on_error ERR
 trap on_interrupt INT TERM HUP
@@ -220,11 +205,18 @@ set_paths() {
     LOG_DIR="$N8N_DIR/logs"
 
     local mode="manager"
-    $DO_BACKUP  && mode="backup"
-    $DO_RESTORE && mode="restore"
-    LOG_FILE="$N8N_DIR/logs/${mode}_n8n_${DATE}.log"
+    if   $DO_INSTALL;   then mode="install"
+    elif $DO_UPGRADE;   then mode="upgrade"
+    elif $DO_BACKUP;    then mode="backup"
+    elif $DO_RESTORE;   then mode="restore"
+    elif $DO_CLEANUP;   then mode="cleanup"
+    elif $DO_AVAILABLE; then mode="available"
+    fi
 
+    LOG_FILE="$N8N_DIR/logs/${mode}_n8n_${DATE}.log"
+    umask 0077
     exec > >(tee -a "$LOG_FILE") 2>&1
+    ln -sf "$LOG_FILE" "$LOG_DIR/latest_${mode}.log"
     log INFO "Working directory: $N8N_DIR"
     log INFO "Logging to: $LOG_FILE"
 }
@@ -332,6 +324,10 @@ install_prereqs() {
 
     # Add invoking user to docker group (effective after re-login)
     local CURRENT_USER="${SUDO_USER:-$(id -un)}"
+    if ! getent group docker >/dev/null 2>&1; then
+        log INFO "Creating 'docker' group…"
+        groupadd docker || true
+    fi
     if [[ "$CURRENT_USER" != "root" ]]; then
         log INFO "Adding user '$CURRENT_USER' to the 'docker' group (you may need to log out/in)…"
         usermod -aG docker "$CURRENT_USER" || true
@@ -361,6 +357,10 @@ install_prereqs() {
 #   0 after exporting SSL_EMAIL.
 ################################################################################
 prompt_ssl_email() {
+    if [[ ! -t 0 ]]; then
+        log ERROR "No TTY to prompt for --ssl-email. Please pass -m <email>."
+        exit 2
+    fi
     while true; do
         read -e -p "Enter your email address (used for SSL cert): " SSL_EMAIL
         if [[ "$SSL_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
@@ -460,37 +460,6 @@ copy_templates_for_mode() {
 }
 
 ################################################################################
-# print_summary_message()
-# Description:
-#   Print a human-friendly final summary after install/upgrade.
-#
-# Behaviors:
-#   - Loads .env for current context.
-#   - Prints domain URL, detected n8n version, timestamp, user, target dir,
-#     SSL email (if set), and log file path.
-#
-# Returns:
-#   0 always.
-################################################################################
-print_summary_message() {
-    echo "═════════════════════════════════════════════════════════════"
-    if $DO_INSTALL; then
-        echo "N8N has been successfully installed!"
-    elif $DO_UPGRADE; then
-        echo "N8N has been successfully upgraded!"
-    fi
-    box_line "Mode:"               "$INSTALL_MODE"
-    box_line "Domain:"             "https://${DOMAIN}"
-    box_line "Installed Version:"  "$(get_current_n8n_version)"
-    box_line "Install Timestamp:"  "$(date "+%Y-%m-%d %H:%M:%S")"
-    box_line "Installed By:"       "${SUDO_USER:-$USER}"
-    box_line "Target Directory:"   "$N8N_DIR"
-    box_line "SSL Email:"          "${SSL_EMAIL:-N/A}"
-    box_line "Execution log:"      "${LOG_FILE}"
-    echo "═════════════════════════════════════════════════════════════"
-}
-
-################################################################################
 # install_stack()
 # Description:
 #   Orchestrate a fresh installation of the n8n stack behind Traefik/LE.
@@ -503,7 +472,7 @@ print_summary_message() {
 #   - Prepares compose + .env with pinned version and secrets (copy_templates_for_mode()).
 #   - Validates compose/env (validate_compose_and_env()).
 #   - Creates volumes as needed and starts stack (docker_up_check()).
-#   - Waits for containers and TLS to be healthy (check_services_up_running()).
+#   - Waits for containers and TLS to be healthy.
 #   - Prints a summary on success.
 #
 # Returns:
@@ -519,9 +488,22 @@ install_stack() {
     validate_compose_and_env
     load_env_file
     discover_from_compose
+    # Ensure initial scale logic in docker_up_check applies on first boot
+    DISCOVERED_MODE="$([[ "$INSTALL_MODE" == "queue" ]] && echo queue || echo single)"
     ensure_external_volumes
     docker_up_check || { log ERROR "Stack unhealthy after install."; exit 1; }
-    print_summary_message
+
+    echo "═════════════════════════════════════════════════════════════"
+    echo "N8N has been successfully installed!"
+    box_line "Installation Mode:"       "$INSTALL_MODE"
+    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Installed Version:"       "$(get_current_n8n_version)"
+    box_line "Install Timestamp:"       "${DATE}"
+    box_line "Installed By:"            "${SUDO_USER:-$USER}"
+    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "SSL Email:"               "${SSL_EMAIL:-N/A}"
+    box_line "Execution log:"           "${LOG_FILE}"
+    echo "═════════════════════════════════════════════════════════════"
 }
 
 ################################################################################
@@ -545,7 +527,7 @@ upgrade_stack() {
     [[ -f "$ENV_FILE" && -f "$COMPOSE_FILE" ]] || { log ERROR "Compose/.env not found in $N8N_DIR"; exit 1; }
     load_env_file
     log INFO "Checking current and latest n8n versions..."
-    cd "$N8N_DIR"
+    cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
 
     local current_version target_version
     current_version=$(get_current_n8n_version || echo "0.0.0")
@@ -584,7 +566,17 @@ upgrade_stack() {
     validate_compose_and_env
     discover_from_compose
     docker_up_check || { log ERROR "Stack unhealthy after upgrade."; exit 1; }
-    print_summary_message
+
+    echo "═════════════════════════════════════════════════════════════"
+    echo "N8N has been successfully upgraded!"
+    box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
+    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Upgraded Version:"        "$(get_current_n8n_version)"
+    box_line "Upgraded Timestamp:"      "${DATE}"
+    box_line "Upgraded By:"             "${SUDO_USER:-$USER}"
+    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "Execution log:"           "${LOG_FILE}"
+    echo "═════════════════════════════════════════════════════════════"
 }
 
 ################################################################################
@@ -729,23 +721,28 @@ do_local_backup() {
             -v "$BACKUP_PATH:/backup" \
             alpine \
             sh -c "tar czf /backup/$vol_backup -C /data ." \
-            || { log ERROR "Failed to archive volume $vol"; return 1; }
+                || { log ERROR "Failed to archive volume $vol"; return 1; }
         log INFO "Volume '$vol' backed up: $vol_backup"
     done
 
     log INFO "Dumping PostgreSQL database..."
     local DB_USER="${DB_POSTGRESDB_USER:-${POSTGRES_USER:-n8n}}"
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
+    local ADMIN_USER="${POSTGRES_USER:-postgres}"
     local pgcid; pgcid="$(container_id_for_service "$POSTGRES_SERVICE")"
+    local ADMIN_PASS="$(_read_env_var_from_container "$pgcid" POSTGRES_PASSWORD)"
 
     if [[ -z "$pgcid" ]]; then
         log ERROR "Postgres service '$POSTGRES_SERVICE' is not running"
         return 1
     fi
 
+    [[ -z "$ADMIN_PASS" ]] && log WARN "POSTGRES_PASSWORD not found in container env; proceeding (trust/peer auth assumed)."
+
     if docker exec "$pgcid" pg_isready &>/dev/null; then
-        docker exec "$pgcid" pg_dump -U "$DB_USER" -d "$DB_NAME" > "$BACKUP_PATH/n8n_postgres_dump_$DATE.sql" \
-            || { log ERROR "Postgres dump failed"; return 1; }
+        docker exec -e PGPASSWORD="$ADMIN_PASS" "$pgcid" \
+            pg_dump -U "$ADMIN_USER" -d "$DB_NAME" > "$BACKUP_PATH/n8n_postgres_dump_$DATE.sql" \
+                || { log ERROR "Postgres dump failed"; return 1; }
         log INFO "Database dump saved to $BACKUP_PATH/n8n_postgres_dump_$DATE.sql"
     else
         log ERROR "Postgres not ready ($POSTGRES_SERVICE)"
@@ -770,8 +767,10 @@ do_local_backup() {
 
     # sha256 checksum
     if [[ -f "$BACKUP_DIR/$BACKUP_FILE" ]]; then
-        sha256sum "$BACKUP_DIR/$BACKUP_FILE" > "$BACKUP_DIR/$BACKUP_FILE.sha256" \
-            || { log ERROR "Failed to write checksum"; return 1; }
+        # Write checksum relative to BACKUP_DIR so verification after download works
+        ( cd "$BACKUP_DIR" \
+          && sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256" ) \
+          || { log ERROR "Failed to write checksum"; return 1; }
     else
         log ERROR "Archive not found after compression: $BACKUP_DIR/$BACKUP_FILE"
         return 1
@@ -857,7 +856,6 @@ write_summary_row() {
     local version="$N8N_VERSION"
     local file="$BACKUP_DIR/backup_summary.md"
     local now; now="$DATE"
-    local cutoff; cutoff=$(date -d '30 days ago' '+%F')
 
     # If the file doesn't exist, write the markdown table header
     if [[ ! -f "$file" ]]; then
@@ -871,14 +869,16 @@ EOF
     printf "| %s | %s | %s | %s |\n" "$now" "$action" "$version" "$status" >> "$file"
 
     # Prune rows older than 30 days (match YYYY-MM-DD at start of each row)
-    # We'll keep the header plus any rows whose DATE ≥ cutoff
     {
-        # print header
         head -n2 "$file"
-        # filter data rows
         tail -n +3 "$file" \
-            | awk -v cut="$cutoff" -F'[| ]+' '$2 >= cut'
+        | awk -F'|' -v cut="$(date -d '30 days ago' '+%F')" '
+            {
+                date=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",date)
+                split(date, dt, "_"); if (dt[1] >= cut) print
+            }'
     } > "${file}.tmp" && mv "${file}.tmp" "$file"
+
 }
 
 ################################################################################
@@ -915,6 +915,8 @@ send_email() {
     local subject="$1"
     local body="$2"
     local attachment="${3:-}"
+
+    require_cmd msmtp || { log ERROR "msmtp not available; cannot send email."; return 1; }
 
     if ! $EMAIL_EXPLICIT; then
         # user never asked → silently skip
@@ -1088,7 +1090,6 @@ Log File: $LOG_FILE"
 #   0 always.
 ################################################################################
 summarize_backup() {
-    local env_domain; env_domain="$(awk -F= '/^DOMAIN=/{print $2}' "$ENV_FILE" 2>/dev/null || echo "")"
     local summary_file="$BACKUP_DIR/backup_summary.md"
     local email_status email_reason
     log INFO "Print a summary of what happened..."
@@ -1111,24 +1112,27 @@ summarize_backup() {
     fi
 
     echo "═════════════════════════════════════════════════════════════"
-    box_line "Action:"          "$ACTION"
-    box_line "Status:"          "$BACKUP_STATUS"
-    box_line "Timestamp:"       "$DATE"
-    box_line "Domain:"          "https://${DOMAIN:-$env_domain}"
+    echo "Backup completed!"
+    box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
+    box_line "Domain:"                  "https://$DOMAIN"
+    box_line "Backup Action:"           "$ACTION"
+    box_line "Backup Status:"           "$BACKUP_STATUS"
+    box_line "Backup Timestamp:"        "$DATE"
     [[ -n "${BACKUP_FILE:-}" ]] && box_line "Backup file:" "$BACKUP_DIR/$BACKUP_FILE"
-    box_line "N8N Version:"     "$N8N_VERSION"
-    box_line "Log File:"        "$LOG_FILE"
-    box_line "Daily tracking:"  "$summary_file"
+    box_line "N8N Version:"             "$N8N_VERSION"
+    box_line "N8N Directory:"           "$N8N_DIR"
+    box_line "Log File:"                "$LOG_FILE"
+    box_line "Daily tracking:"          "$summary_file"
     case "$UPLOAD_STATUS" in
         "SUCCESS")
-            box_line "Google Drive upload:" "SUCCESS"
-            box_line "Folder link:"         "$DRIVE_LINK"
+            box_line "Remote upload:"          "SUCCESS"
+            box_line "Remote folder link:"     "$DRIVE_LINK"
             ;;
         "SKIPPED")
-            box_line "Google Drive upload:" "SKIPPED"
+            box_line "Remote upload:" "SKIPPED"
             ;;
         *)
-            box_line "Google Drive upload:" "FAILED"
+            box_line "Remote upload:" "FAILED"
             ;;
     esac
     if [[ -n "$email_reason" ]]; then
@@ -1160,7 +1164,8 @@ backup_stack() {
     BACKUP_FILE=""
     DRIVE_LINK=""
     load_env_file
-    discover_from_compose 
+    discover_from_compose
+    detect_mode_runtime || true
     snapshot_bootstrap
 
     if is_changed_since_snapshot; then
@@ -1204,7 +1209,8 @@ backup_stack() {
     fi
 
     # Record in rolling summary
-    write_summary_row "$ACTION" "$BACKUP_STATUS"
+    # cache the Google Drive (remote) link exactly once
+
 
     # cache the Google Drive link exactly once
     DRIVE_LINK="$(get_google_drive_link)"
@@ -1256,7 +1262,8 @@ fetch_remote_if_needed() {
             # try to fetch checksum and verify if available
             log INFO "Verifying checksum..."
             if rclone copyto "${TARGET_RESTORE_FILE}.sha256" "${local_path}.sha256" "${RCLONE_FLAGS[@]}"; then
-                (cd "$tmp_dir" && sha256sum -c "$(basename "${local_path}.sha256")") \
+                ( cd "$tmp_dir" \
+                    && sha256sum -c "$(basename "${local_path}.sha256")" ) \
                     || { log ERROR "Checksum verification failed for $local_path"; return 1; }
                 log INFO "Checksum verified."
             else
@@ -1363,7 +1370,7 @@ restore_stack() {
 
     # Stop and remove the current containers before cleaning volumes
     log INFO "Stopping and removing containers before restore..."
-    compose down --volumes --remove-orphans \
+    compose down --remove-orphans \
         || { log ERROR "docker compose down failed"; return 1; }
 
     # Check if we have a SQL database
@@ -1422,6 +1429,8 @@ restore_stack() {
     cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
 
     log INFO "Starting PostgreSQL first..."
+    # Recreate any external volumes the compose expects
+    ensure_external_volumes
     compose up -d "$POSTGRES_SERVICE" \
         || { log ERROR "Failed to start postgres"; return 1; }
 
@@ -1439,28 +1448,32 @@ restore_stack() {
     # Database variables
     local DB_USER="${DB_POSTGRESDB_USER:-${POSTGRES_USER:-n8n}}"
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
+    local ADMIN_USER="${POSTGRES_USER:-postgres}"
+    local ADMIN_PASS="$(_read_env_var_from_container "$PG_CID" POSTGRES_PASSWORD)"
+
     local POSTGRES_RESTORE_MODE=""
 
     if [[ -n "$dump_file" ]]; then
         POSTGRES_RESTORE_MODE="dump"
         log INFO "Custom dump found: $(basename "$dump_file"). Restoring via pg_restore..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
-        docker exec -i "$PG_CID" pg_restore -U "$DB_USER" -d "${DB_NAME}" -c -v < "$dump_file"
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
+
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" pg_restore -U "$ADMIN_USER" -d "${DB_NAME}" -c -v < "$dump_file"
+
 
     elif [[ -n "$sql_file" ]]; then
-        POSTGRES_RESTORE_MODE="dump"
+        POSTGRES_RESTORE_MODE="sql"
         log INFO "SQL dump found: $(basename "$sql_file"). Restoring via psql..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
-        docker exec -i "$PG_CID" psql -U "$DB_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
-
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
     else
         POSTGRES_RESTORE_MODE="volume"
         log INFO "No SQL dump found. Assuming the postgres-data volume already contains the DB. Skipping SQL import."
@@ -1468,6 +1481,7 @@ restore_stack() {
 
     # When the PostgreSQL DB is ready, start other containers
     log INFO "Starting the rest of the stack..."
+    ensure_external_volumes
     docker_up_check || { log ERROR "Stack unhealthy after restore."; return 1; }
 
     log INFO "Cleaning up..."
@@ -1487,16 +1501,17 @@ restore_stack() {
     else
         restored_list="(none)"
     fi
+
     echo "═════════════════════════════════════════════════════════════"
     echo "Restore completed successfully."
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
     box_line "Domain:"                  "https://$DOMAIN"
     box_line "Restore from file:"       "$requested_spec"
     box_line "Local archive used:"      "$TARGET_RESTORE_FILE"
+    box_line "Restore Timestamp:"       "$DATE"
     box_line "N8N Version:"             "$N8N_VERSION"
     box_line "N8N Directory:"           "$N8N_DIR"
     box_line "Log File:"                "$LOG_FILE"
-    box_line "Timestamp:"               "$DATE"
     box_line "Volumes restored:"        "${restored_list}"
     if [[ "$POSTGRES_RESTORE_MODE" == "dump" ]]; then
         box_line "PostgreSQL:"           "Restored from SQL dump"
@@ -1540,12 +1555,15 @@ cleanup_stack() {
     read -e -p "Continue? [y/N] " ans
     [[ "${ans,,}" == "y" ]] || { log INFO "Cleanup cancelled."; return 0; }
 
-    log INFO "Shutting down stack and removing orphans + anonymous volumes..."
+    log INFO "Shutting down stack (respect KEEP_CERTS=${KEEP_CERTS})..."
+    local -a down_flags=(--remove-orphans)
+    [[ "$KEEP_CERTS" == "false" ]] && down_flags+=(-v)
+
     if [[ -f "$N8N_DIR/docker-compose.yml" ]]; then
-        compose down --remove-orphans -v || true
+        compose down "${down_flags[@]}" || true
     else
         log WARN "docker-compose.yml not found at \$N8N_DIR; attempting plain 'docker compose down' in $PWD."
-        docker compose down --remove-orphans -v || true
+        docker compose down "${down_flags[@]}" || true
     fi
 
     log INFO "Removing related volumes..."

@@ -272,7 +272,7 @@ upsert_env_var() {
     local key="$1" val="$2" file="$3"
     [[ -f "$file" ]] || : > "$file"
 
-    local esc="${val//\\/\\\\}"; esc="${esc//&/\\&}"
+    local esc="${val//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//|/\\|}"
     if grep -qE "^${key}=" "$file"; then
         sed -i "s|^${key}=.*$|${key}=${esc}|" "$file"
     else
@@ -580,11 +580,10 @@ find_missing_expected_containers() {
 dump_service_logs() {
     local service="$1"
     local tail="${2:-200}"
-    local cid name
+    local cid
 
     cid="$(container_id_for_service "$service")"
     if [[ -n "$cid" ]]; then
-        name="$(docker inspect --format='{{.Name}}' "$cid" | sed 's#^/##')"
         docker logs --tail "$tail" "$cid" || true
     else
         log WARN "Service '$service' has no running container for log dump."
@@ -653,7 +652,9 @@ check_container_healthy() {
         cids="$(docker ps -q -f "name=^${t}$" 2>/dev/null | awk 'NF')" || true
         [[ -n "$cids" ]] && { echo "$cids"; return 0; }
 
-        cids="$(docker ps -q -f "name=^${project}-${t}-[0-9]+$" 2>/dev/null | awk 'NF')" || true
+        cids="$(docker ps -q -f "name=${project}-${t}-" 2>/dev/null | awk 'NF')" || true
+        [[ -n "$cids" ]] && { echo "$cids"; return 0; }
+        cids="$(docker ps -q -f "name=${project}_${t}_" 2>/dev/null | awk 'NF')" || true
         [[ -n "$cids" ]] && { echo "$cids"; return 0; }
 
         return 1
@@ -906,27 +907,6 @@ verify_traefik_certificate() {
 }
 
 ################################################################################
-# check_services_up_running()
-# Description:
-#     High-level health gate for the stack: containers + TLS certificate.
-#
-# Returns:
-#     0 if all checks pass; 1 otherwise.
-################################################################################
-check_services_up_running() {
-    if ! wait_for_containers_healthy; then
-        log ERROR "Some containers are not running or unhealthy. Please check the logs above."
-        return 1
-    fi
-
-    if ! verify_traefik_certificate "$DOMAIN"; then
-        log ERROR "Traefik failed to issue a valid TLS certificate. Please check DNS, Traefik logs, and try again."
-        return 1
-    fi
-    return 0
-}
-
-################################################################################
 # check_domain()
 # Description:
 #     Verify the provided DOMAIN’s A record points to this server’s public IP.
@@ -1024,18 +1004,31 @@ detect_mode_runtime() {
 ################################################################################
 # docker_up_check()
 # Description:
-#     Ensure external volumes, bring up the stack, and wait for health + TLS.
+#   Bring the stack up and verify readiness.
+#
+# Behaviors:
+#   - Best-effort `compose pull` to prefetch images.
+#   - If DISCOVERED_MODE=queue → scales worker replicas to $N8N_WORKER_SCALE (default 1).
+#   - Starts services with `docker compose up -d`.
+#   - Detects runtime mode via `detect_mode_runtime` (for logging/summary).
+#   - Waits for all containers to be running & healthy (timeout 180s, interval 10s).
+#   - Verifies Traefik HTTPS is reachable for $DOMAIN (valid certificate).
 #
 # Returns:
-#     0 on success; 1 on health/TLS failures.
+#   0 on success; 1 if compose up, health checks, or TLS verification fail.
 ################################################################################
+
 docker_up_check() {
     log INFO "Starting Docker Compose…"
-    compose pull --quiet || true
+    compose pull -q || true
     local up_args=(-d)
     if [[ "${DISCOVERED_MODE:-unknown}" == "queue" ]]; then
         local replicas="${N8N_WORKER_SCALE:-1}"
-        up_args+=( --scale "worker=${replicas}" )
+        if printf '%s\n' "${DISCOVERED_SERVICES[@]}" | grep -qx "worker"; then
+            up_args+=( --scale "worker=${replicas}" )
+        else
+            log WARN "Queue mode detected but no 'worker' service in compose; skip scaling."
+        fi
     fi
     compose up "${up_args[@]}" || return 1
     detect_mode_runtime || true
