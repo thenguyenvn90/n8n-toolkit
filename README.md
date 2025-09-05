@@ -392,6 +392,7 @@ Interactive plan to:
 
 👉 For details about queue mode, see the full guide: [**n8n-queue-mode**](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)
 
+⚠️ Set N8N_WORKER_SCALE in .env to change worker replicas (default 1).
 ---
 
 ## Scheduling Daily Backups
@@ -411,7 +412,10 @@ set -euo pipefail
 export SMTP_USER="you@YourDomain.com"
 export SMTP_PASS="your_app_password"   # Gmail App Password
 # Run backup for the deployed n8n dir
-/opt/n8n-toolkit/n8n_manager.sh -b -d /home/n8n -s gdrive:/n8n-backups -e you@YourDomain.com --notify-on-success >> /opt/n8n-toolkit/logs/cron.log 2>&1
+/opt/n8n-toolkit/n8n_manager.sh -b -d /home/n8n -s gdrive:/n8n-backups -e you@YourDomain.com --notify-on-success "$@" >> /opt/n8n-toolkit/logs/cron.log 2>&1
+EOF
+sudo chmod +x /opt/n8n-toolkit/run_backup.sh
+
 EOF
 sudo chmod +x /opt/n8n-toolkit/run_backup.sh
 ```
@@ -431,7 +435,7 @@ Add:
 - Want a weekly forced backup as well? Add this extra line to force on Sundays:
 
 ```cron
-15 2 * * 0 /opt/n8n-toolkit/run_backup.sh
+15 2 * * 0 /opt/n8n-toolkit/run_backup.sh -f
 ```
 ---
 
@@ -503,8 +507,13 @@ rclone delete --min-age 7d gdrive-user:n8n-backups
 
 ## Logs & Health
 
-- **Run logs** (manager): `logs/` under your target dir (default `/home/n8n/logs/`)  
-  - `install_n8n_<timestamp>.log`, `upgrade_n8n_<timestamp>.log`, `backup_n8n_<timestamp>.log`, `restore_n8n_<timestamp>.log`, `cleanup_n8n_<timestamp>.log`, symlink `latest_<mode>.log`.
+Run logs: under logs/ in your target dir (default /home/n8n/logs/):
+
+- Install: logs/install_n8n_<YYYY-MM-DD_HH-MM-SS>.log
+- Upgrade: logs/upgrade_n8n_<YYYY-MM-DD_HH-MM-SS>.log
+- Backup: logs/backup_n8n_<YYYY-MM-DD_HH-MM-SS>.log
+- Restore: logs/restore_n8n_<YYYY-MM-DD_HH-MM-SS>.log
+- Symlink: logs/latest_<action>.log (e.g., latest_backup.log)
 
 - **Containers:**
   ```bash
