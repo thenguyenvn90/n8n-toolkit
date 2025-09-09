@@ -517,6 +517,88 @@ ensure_external_volumes() {
 }
 
 ################################################################################
+# project_name()
+# Description:
+#   Resolve the effective Compose project name used for containers/volumes.
+#   - Returns COMPOSE_PROJECT_NAME from .env when set
+#   - Otherwise falls back to basename of $N8N_DIR
+# Output:
+#   Prints the project name to stdout.
+################################################################################
+project_name() {
+    read_env_var "$ENV_FILE" COMPOSE_PROJECT_NAME || basename "$N8N_DIR"
+}
+
+################################################################################
+# is_external_volume(<logical_name>)
+# Description:
+#   Tell whether the logical volume in compose is marked "external: true".
+#   Requires discover_from_compose() has populated DISCOVERED_VOLUME_EXTERNAL[].
+# Exit status:
+#   0 if external; 1 otherwise.
+################################################################################
+is_external_volume() {
+    local v="$1" x
+    for x in "${DISCOVERED_VOLUME_EXTERNAL[@]}"; do
+        [[ "$x" == "$v" ]] && return 0
+    done
+    return 1
+}
+
+################################################################################
+# expected_volume_name(<logical_name>)
+# Description:
+#   Given a logical volume name from compose (e.g., "postgres-data"),
+#   return the actual Docker volume name Compose will use:
+#     - If external → keep the logical name as-is
+#     - Else        → "<project>_<logical>"
+# Output:
+#   Prints the expected real volume name.
+################################################################################
+expected_volume_name() {
+    local logical="$1"
+    if is_external_volume "$logical"; then
+        printf '%s\n' "$logical"
+    else
+        printf '%s_%s\n' "$(project_name)" "$logical"
+    fi
+}
+
+################################################################################
+# resolve_volume_name(<logical_name>)
+# Description:
+#   Best-effort lookup of the real Docker volume name that currently exists
+#   for a given logical name. Tries:
+#     1) <logical>
+#     2) <project>_<logical>
+#     3) <project>-<logical>    (rare legacy form)
+# Output:
+#   Prints the first existing match; empty if none found.
+# Exit status:
+#   0 if a match is printed; 1 if none found.
+################################################################################
+resolve_volume_name() {
+    local logical="$1" pn; pn="$(project_name)"
+    local cand
+    for cand in "$logical" "${pn}_${logical}" "${pn}-${logical}"; do
+        docker volume inspect "$cand" >/dev/null 2>&1 && { printf '%s\n' "$cand"; return 0; }
+    done
+    return 1
+}
+
+################################################################################
+# volume_mountpoint(<real_volume_name>)
+# Description:
+#   Return the local filesystem mountpoint path of a Docker volume
+#   (usually /var/lib/docker/volumes/<id>/_data).
+# Output:
+#   Prints the path to stdout; empty if inspect fails.
+################################################################################
+volume_mountpoint() {
+    docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null
+}
+
+################################################################################
 # discover_running_containers()
 # Description:
 #     Populate RUNNING_CONTAINER_NAMES with running container names in this project.
@@ -1139,7 +1221,74 @@ docker_up_check() {
     compose up "${up_args[@]}" || return 1
     detect_mode_runtime || true
     wait_for_containers_healthy || return 1
-    verify_traefik_certificate "$DOMAIN" || return 1
+}
+
+################################################################################
+# preflight_dns_checks()
+# Description:
+#   Hard-fail DNS preflight for all exposed hostnames *before* bringing the
+#   stack up. The set of hostnames is provided by `list_exposed_fqdns`, which
+#   should echo one FQDN per line (and is expected to include at least
+#   N8N_FQDN).
+#
+# Behaviors:
+#   - Iterates over the FQDNs emitted by `list_exposed_fqdns`.
+#   - For each FQDN, runs `check_domain` (via a temporary DOMAIN=<fqdn>)
+#     to validate public A/AAAA records (typically also matching this host’s
+#     public IP).
+#   - Aggregates failures; returns non-zero if any FQDN fails validation.
+#   - This function does not itself enforce that N8N_FQDN is set; that contract
+#     belongs to `list_exposed_fqdns` (which should error if required inputs
+#     are missing).
+#
+# Returns:
+#   0 if all FQDNs pass `check_domain`; 1 if any fail.
+################################################################################
+preflight_dns_checks() {
+    local errs=0 fq
+    while IFS= read -r fq; do
+        [[ -z "$fq" ]] && continue
+        ( DOMAIN="$fq"; check_domain ) || ((errs++))
+    done < <(list_exposed_fqdns)
+    (( errs == 0 )) || { log ERROR "DNS preflight failed for one or more FQDNs."; return 1; }
+    return 0
+}
+
+################################################################################
+# post_up_tls_checks()
+# Description:
+#   Post-deploy TLS verification for all exposed hostnames. Treats failures as
+#   warnings by default (to tolerate Let’s Encrypt issuance/propagation lag),
+#   but becomes strict if STRICT_TLS_ALL=true.
+#
+# Behaviors:
+#   - Iterates over the FQDNs emitted by `list_exposed_fqdns`.
+#   - For each FQDN, calls `verify_traefik_certificate <fqdn>` to confirm that
+#     HTTPS is reachable with a valid certificate.
+#   - Aggregates failures.
+#   - If any verification fails:
+#       * STRICT_TLS_ALL=true  → log ERROR and return 1.
+#       * otherwise            → log WARN and return 0.
+#
+# Returns:
+#   0 if all verifications succeed, or if failures are allowed (STRICT_TLS_ALL
+#   not true). Returns 1 only when STRICT_TLS_ALL=true and at least one FQDN
+#   fails verification.
+################################################################################
+post_up_tls_checks() {
+    local strict="${STRICT_TLS_ALL:-false}" errs=0 fq
+    while IFS= read -r fq; do
+        [[ -z "$fq" ]] && continue
+        verify_traefik_certificate "$fq" || ((errs++))
+    done < <(list_exposed_fqdns)
+    if (( errs > 0 )); then
+        if [[ "${strict,,}" == "true" ]]; then
+            log ERROR "TLS verification failed for one or more FQDNs (STRICT_TLS_ALL=true)."; return 1
+        else
+            log WARN "TLS verification failed for one or more FQDNs (continuing; set STRICT_TLS_ALL=true to enforce)."
+        fi
+    fi
+    return 0
 }
 
 ################################################################################

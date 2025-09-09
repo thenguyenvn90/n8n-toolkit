@@ -688,9 +688,12 @@ snapshot_bootstrap() {
 
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        mkdir -p "$snap/volumes/$vol"
-        rsync -a "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" || true
+    mkdir -p "$snap/volumes/$vol"
+    real="$(resolve_volume_name "$vol" || true)"; [[ -z "$real" ]] && { log INFO "Snapshot: '$vol' missing; skip."; continue; }
+    mp="$(volume_mountpoint "$real")"; [[ -z "$mp" || ! -d "$mp" ]] && { log WARN "Snapshot: no mountpoint for '$real'; skip."; continue; }
+    rsync -a "$mp/" "$snap/volumes/$vol/" || true
     done
+
     [[ -f "$ENV_FILE" ]] && rsync -a "$ENV_FILE" "$snap/config/" || true
     [[ -f "$COMPOSE_FILE" ]] && rsync -a "$COMPOSE_FILE" "$snap/config/" || true
 }
@@ -711,9 +714,11 @@ snapshot_refresh() {
     mkdir -p "$snap/volumes" "$snap/config"
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        rsync -a --delete \
-            --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
-            "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" || true
+    real="$(resolve_volume_name "$vol" || true)"; [[ -z "$real" ]] && { log INFO "Snapshot refresh: '$vol' missing; skip."; continue; }
+    mp="$(volume_mountpoint "$real")"; [[ -z "$mp" || ! -d "$mp" ]] && { log WARN "Snapshot refresh: no mountpoint for '$real'; skip."; continue; }
+    rsync -a --delete \
+        --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
+        "$mp/" "$snap/volumes/$vol/" || true
     done
     [[ -f "$ENV_FILE" ]] && rsync -a --delete "$ENV_FILE" "$snap/config/" || true
     [[ -f "$COMPOSE_FILE" ]] && rsync -a --delete "$COMPOSE_FILE" "$snap/config/" || true
@@ -739,14 +744,16 @@ is_changed_since_snapshot() {
     local vol diffs
 
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        diffs="$(rsync -rtun \
-            --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
-            "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" | grep -v '/$' || true)"
-        if [[ -n "$diffs" ]]; then
-            log INFO "Change detected in volume: $vol"
-            log DEBUG "  $diffs"
-            return 0
-        fi
+    real="$(resolve_volume_name "$vol" || true)"; [[ -z "$real" ]] && continue
+    mp="$(volume_mountpoint "$real")"; [[ -z "$mp" || ! -d "$mp" ]] && continue
+    diffs="$(rsync -rtun \
+        --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
+        "$mp/" "$snap/volumes/$vol/" | grep -v '/$' || true)"
+    if [[ -n "$diffs" ]]; then
+        log INFO "Change detected in volume: $vol"
+        log DEBUG "  $diffs"
+        return 0
+    fi
     done
 
     local f
@@ -801,17 +808,18 @@ do_local_backup() {
     log INFO "Backing up Docker volumes..."
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        if ! docker volume inspect "$vol" &>/dev/null; then
-            log ERROR "Volume $vol not found"
-            return 1
+        real="$(resolve_volume_name "$vol" || true)"
+        if [[ -z "$real" ]]; then
+            log INFO "Skipping volume '$vol' (not present on host)."
+            continue
         fi
         local vol_backup="volume_${vol}_$DATE.tar.gz"
         docker run --rm \
-            -v "${vol}:/data" \
+            -v "${real}:/data" \
             -v "$BACKUP_PATH:/backup" \
             alpine \
             sh -c "tar czf /backup/$vol_backup -C /data ." \
-                || { log ERROR "Failed to archive volume $vol"; return 1; }
+            || { log ERROR "Failed to archive volume $vol"; return 1; }
         log INFO "Volume '$vol' backed up: $vol_backup"
     done
 
@@ -1515,34 +1523,37 @@ restore_stack() {
     log INFO "Cleaning existing Docker volumes before restore..."
     local vol
     for vol in "${RESTORE_VOLUMES[@]}"; do
-        if [[ "$vol" == "letsencrypt" ]]; then
-            log INFO "Skipping volume '$vol' (TLS certs) during restore."
-            continue
-        fi
-        if docker volume inspect "$vol" >/dev/null 2>&1; then
-            docker volume rm "$vol" && log INFO "Removed volume: $vol"
-        else
-            log INFO "Volume '$vol' not found, skipping..."
-        fi
+    if [[ "$vol" == "letsencrypt" ]]; then
+        log INFO "Skipping volume '$vol' (TLS certs) during restore."
+        continue
+    fi
+    real="$(resolve_volume_name "$vol" || expected_volume_name "$vol")"
+    if docker volume inspect "$real" >/dev/null 2>&1; then
+        docker volume rm "$real" && log INFO "Removed volume: $vol"
+    else
+        log INFO "Volume '$vol' not found, skipping..."
+    fi
     done
 
     # Restore Docker volumes
     log INFO "Restoring volumes from archive..."
     for vol in "${RESTORE_VOLUMES[@]}"; do
-        local vol_file
-        vol_file="$(find "$restore_dir" -name "*${vol}_*.tar.gz" -print -quit || true)"
-        if [[ -z "${vol_file:-}" ]]; then
-            log ERROR "No backup found for volume $vol"
-            return 1
-        fi
-        docker volume create "$vol" >/dev/null
+    local vol_file
+    vol_file="$(find "$restore_dir" -name "*${vol}_*.tar.gz" -print -quit || true)"
+    if [[ -z "${vol_file:-}" ]]; then
+        log ERROR "No backup found for volume $vol"
+        return 1
+    fi
 
-        docker run --rm -v "${vol}:/data" -v "$restore_dir:/backup" alpine \
-            sh -c "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
-            && tar xzf /backup/$(basename "$vol_file") -C /data" \
-            || { log ERROR "Failed to restore $vol"; return 1; }
+    real="$(expected_volume_name "$vol")"
+    docker volume create "$real" >/dev/null
 
-        log INFO "Volume $vol restored"
+    docker run --rm -v "${real}:/data" -v "$restore_dir:/backup" alpine \
+        sh -c "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+        && tar xzf /backup/$(basename "$vol_file") -C /data" \
+        || { log ERROR "Failed to restore $vol"; return 1; }
+
+    log INFO "Volume $vol restored"
     done
 
     log INFO "Start working on $N8N_DIR ..."
@@ -1684,19 +1695,20 @@ cleanup_stack() {
     log INFO "Removing related volumes..."
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        if [[ "$KEEP_CERTS" == "true" && "$vol" == "letsencrypt" ]]; then
-            log INFO "Skipping volume '$vol' (KEEP_CERTS=true)"
-            continue
-        fi
-        if docker volume inspect "$vol" >/dev/null 2>&1; then
-            if docker volume rm "$vol" >/dev/null 2>&1; then
-                log INFO "Removed volume: $vol"
-            else
-                log WARN "Could not remove volume '$vol' (in use?)."
-            fi
+    if [[ "$KEEP_CERTS" == "true" && "$vol" == "letsencrypt" ]]; then
+        log INFO "Skipping volume '$vol' (KEEP_CERTS=true)"
+        continue
+    fi
+    real="$(resolve_volume_name "$vol" || expected_volume_name "$vol")"
+    if docker volume inspect "$real" >/dev/null 2>&1; then
+        if docker volume rm "$real" >/dev/null 2>&1; then
+            log INFO "Removed volume: $vol"
         else
-            log INFO "Volume '$vol' not found; skipping."
+            log WARN "Could not remove volume '$vol' (in use?)."
         fi
+    else
+        log INFO "Volume '$vol' not found; skipping."
+    fi
     done
 
     log INFO "Removing docker network (if exists): ${NETWORK_NAME}"
