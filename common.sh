@@ -16,6 +16,7 @@ IFS=$'\n\t'
 #   • “up + wait healthy” helper (with external volume ensure)
 #   • Version & image utilities
 #   • Domain DNS sanity check and optional TLS verification
+#   • ensure_monitoring_auth(): generate htpasswd usersfile once
 #############################################################################################
 
 # ------------------------------ Globals used by discovery ------------------------------
@@ -712,7 +713,7 @@ check_container_healthy() {
 ################################################################################
 wait_for_containers_healthy() {
     local timeout="${1:-180}"
-    local interval="${2:-10}"
+    local interval="${2:-20}"
     local elapsed=0
 
     discover_from_compose || true
@@ -823,9 +824,12 @@ wait_for_containers_healthy() {
 ################################################################################
 verify_traefik_certificate() {
     local domain="${1:-${DOMAIN:-}}"
-    local MAX_RETRIES="${2:-12}"
+    local MAX_RETRIES="${2:-6}"
     local SLEEP_INTERVAL="${3:-10}"
-    local domain_url curl_rc http_code success=false
+
+    local domain_url success=false
+    # Accept 2xx/3xx and also 401/403/404 (auth-guarded apps) — TLS must still be valid.
+    local ok_re='^(2[0-9]{2}|3[0-9]{2}|401|403|404)$'
 
     if [[ -z "$domain" ]]; then
         log ERROR "verify_traefik_certificate: domain is empty"
@@ -842,7 +846,8 @@ verify_traefik_certificate() {
         log WARN "'dig' not found; skipping DNS details."
     fi
 
-    if curl -ksf -o /dev/null --connect-timeout 3 --max-time 5 "${domain_url}"; then
+    # Quick probe (do NOT use --fail so 401 doesn't look like "down")
+    if curl -ks -o /dev/null --connect-timeout 3 --max-time 5 "${domain_url}"; then
         log INFO "TLS endpoint is reachable (insecure probe). Waiting for a valid certificate..."
     else
         log INFO "TLS endpoint not yet reachable. Proceeding with normal retries..."
@@ -850,28 +855,38 @@ verify_traefik_certificate() {
 
     log INFO "Checking HTTPS reachability (valid chain required by curl)…"
     for ((i=1; i<=MAX_RETRIES; i++)); do
-        if http_code="$(curl -fsS -o /dev/null -w '%{http_code}' \
-                         --connect-timeout 5 --max-time 15 \
-                         "${domain_url}" 2>/dev/null)"; then
-            if [[ "$http_code" =~ ^([2-5][0-9][0-9])$ ]]; then
-                log INFO "HTTPS reachable (HTTP ${http_code}) [attempt ${i}/${MAX_RETRIES}]"
+        # No --fail: we want status on 401/403/404 too. Require ssl_verify_result==0.
+        local out rc http ssl
+        out="$(curl -sSI \
+                --connect-timeout 5 --max-time 15 \
+                --proto =https --tlsv1.2 \
+                --write-out 'http=%{http_code} ssl=%{ssl_verify_result}' \
+                --output /dev/null "${domain_url}")"
+        rc=$?
+        http="$(sed -n 's/.*http=\([0-9]\+\).*/\1/p' <<<"$out")"
+        ssl="$(sed -n 's/.*ssl=\([0-9]\+\).*/\1/p' <<<"$out")"
+
+        if (( rc == 0 )); then
+            if [[ "$ssl" == "0" && "$http" =~ $ok_re ]]; then
+                log INFO "HTTPS reachable for ${domain} (status=${http}, tls=ok) [attempt ${i}/${MAX_RETRIES}]"
                 success=true
                 break
             else
-                log WARN "HTTPS up but app not ready yet (HTTP ${http_code}) [attempt ${i}/${MAX_RETRIES}]"
+                log WARN "HTTPS up but not acceptable yet (http=${http:-N/A}, ssl=${ssl:-N/A}) [attempt ${i}/${MAX_RETRIES}]"
             fi
         else
-            curl_rc=$?
-            if [[ $curl_rc -eq 60 ]]; then
-                if curl -ksf -o /dev/null --connect-timeout 3 --max-time 5 "${domain_url}"; then
+            if (( rc == 60 )); then
+                # TLS chain not valid yet
+                if curl -ks -o /dev/null --connect-timeout 3 --max-time 5 "${domain_url}"; then
                     log WARN "TLS reachable but certificate not valid yet (curl_exit=60) [attempt ${i}/${MAX_RETRIES}]"
                 else
                     log WARN "HTTPS not ready (curl_exit=60) [attempt ${i}/${MAX_RETRIES}]"
                 fi
             else
-                log WARN "HTTPS not ready (curl_exit=${curl_rc}, http=${http_code:-N/A}) [attempt ${i}/${MAX_RETRIES}]"
+                log WARN "HTTPS not ready (curl_exit=${rc}, http=${http:-N/A}) [attempt ${i}/${MAX_RETRIES}]"
             fi
         fi
+
         [[ $i -lt $MAX_RETRIES ]] && { log INFO "Retrying in ${SLEEP_INTERVAL}s..."; sleep "$SLEEP_INTERVAL"; }
     done
 
@@ -907,6 +922,31 @@ verify_traefik_certificate() {
 }
 
 ################################################################################
+# list_exposed_fqdns()
+# Description:
+#   Return the list of FQDNs that should be reachable (DNS/TLS) based on the
+#   current .env and profiles. Output: one FQDN per line.
+################################################################################
+list_exposed_fqdns() {
+    [[ -f "$ENV_FILE" ]] || { return 0; }
+
+    local n8n graf prom profiles expose
+    n8n="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
+    graf="$(read_env_var "$ENV_FILE" GRAFANA_FQDN || true)"
+    prom="$(read_env_var "$ENV_FILE" PROMETHEUS_FQDN || true)"
+    profiles="$(read_env_var "$ENV_FILE" COMPOSE_PROFILES || true)"
+    expose="$(read_env_var "$ENV_FILE" EXPOSE_PROMETHEUS || echo false)"
+
+    [[ -n "$n8n" ]] && printf '%s\n' "$n8n"
+    if [[ "$profiles" == *monitoring* ]]; then
+        [[ -n "$graf" ]] && printf '%s\n' "$graf"
+        if [[ "${expose,,}" == "true" ]]; then
+            [[ -n "$prom" ]] && printf '%s\n' "$prom"
+        fi
+    fi
+}
+
+################################################################################
 # check_domain()
 # Description:
 #     Verify the provided DOMAIN’s A record points to this server’s public IP.
@@ -938,10 +978,77 @@ check_domain() {
 
     if echo "$domain_ips" | tr ' ' '\n' | grep -Fxq "$server_ip"; then
         log INFO "Domain $DOMAIN is correctly pointing to this server."
+        return 0
     else
         log ERROR "Domain $DOMAIN is NOT pointing to this server. Update your A record to: $server_ip"
-        exit 1
+        return 1
     fi
+}
+
+################################################################################
+# gen_bcrypt_hash()
+# Description:
+#   Return a bcrypt hash for a given user+password (cost 12).
+#   Prefers `htpasswd`; falls back to Docker httpd:2.4-alpine.
+# Returns:
+#   Prints hash to stdout (no username), or empty string on failure.
+################################################################################
+# --- bcrypt helper for Traefik usersFile ---
+# Usage: gen_bcrypt_hash <user> <pass>  -> prints only the bcrypt hash
+gen_bcrypt_hash() {
+    local user="$1" pass="$2" out
+
+    if command -v htpasswd >/dev/null 2>&1; then
+        # apache2-utils
+        out="$(htpasswd -nbBC 12 "$user" "$pass" 2>/dev/null)" || return 1
+        printf '%s\n' "${out#*:}"
+        return 0
+    fi
+
+    # Fallback: use a tiny httpd container just to run htpasswd
+    if command -v docker >/dev/null 2>&1; then
+        out="$(docker run --rm httpd:2.4-alpine htpasswd -nbBC 12 "$user" "$pass" 2>/dev/null)" || return 1
+        printf '%s\n' "${out#*:}"
+        return 0
+    fi
+
+    echo "[ERROR] No bcrypt tool available (need apache2-utils 'htpasswd' or Docker)." >&2
+    return 127
+}
+
+################################################################################
+# ensure_monitoring_auth()
+# Create secrets/htpasswd from MONITORING_BASIC_AUTH_USER/PASS (or CLI overrides).
+################################################################################
+ensure_monitoring_auth() {
+    [[ -f "$ENV_FILE" ]] || return 0
+    [[ -n "$BASIC_AUTH_USER" ]] && upsert_env_var "MONITORING_BASIC_AUTH_USER" "$BASIC_AUTH_USER" "$ENV_FILE"
+    [[ -n "$BASIC_AUTH_PASS" ]] && upsert_env_var "MONITORING_BASIC_AUTH_PASS" "$BASIC_AUTH_PASS" "$ENV_FILE"
+
+    local user pass
+    user="$(read_env_var "$ENV_FILE" MONITORING_BASIC_AUTH_USER || true)"
+    pass="$(read_env_var "$ENV_FILE" MONITORING_BASIC_AUTH_PASS || true)"
+    if [[ -z "$user" || -z "$pass" ]]; then
+        log WARN "MONITORING_BASIC_AUTH_USER/PASS not set; skipping usersFile creation."
+        return 0
+    fi
+
+    local hash
+    hash="$(gen_bcrypt_hash "$user" "$pass")"
+    if [[ -z "$hash" ]]; then
+        log ERROR "Failed to bcrypt MONITORING_BASIC_AUTH_PASS."
+        return 1
+    fi
+
+    local secdir="$N8N_DIR/secrets"
+    local file="$secdir/htpasswd"
+    mkdir -p "$secdir"
+    printf '%s:%s\n' "$user" "$hash" > "$file"
+    chmod 640 "$file" || true
+    log INFO "Wrote Traefik usersFile: $file"
+
+    # Record the container path used in labels
+    upsert_env_var "TRAEFIK_USERSFILE" "/etc/traefik/htpasswd" "$ENV_FILE"
 }
 
 ################################################################################
@@ -1017,7 +1124,6 @@ detect_mode_runtime() {
 # Returns:
 #   0 on success; 1 if compose up, health checks, or TLS verification fail.
 ################################################################################
-
 docker_up_check() {
     log INFO "Starting Docker Compose…"
     compose pull -q || true
@@ -1032,7 +1138,7 @@ docker_up_check() {
     fi
     compose up "${up_args[@]}" || return 1
     detect_mode_runtime || true
-    wait_for_containers_healthy 180 10 || return 1
+    wait_for_containers_healthy || return 1
     verify_traefik_certificate "$DOMAIN" || return 1
 }
 

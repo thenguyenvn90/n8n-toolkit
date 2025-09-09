@@ -7,22 +7,33 @@ IFS=$'\n\t'
 # N8N Installation, Upgrade, Backup & Restore Manager (Mode-aware: Single or Queue)
 # Author:      TheNguyen
 # Email:       thenguyen.ai.automation@gmail.com
-# Version:     2.0.0
-# Date:        2025-09-04
+# Version:     2.1.0
+# Date:        2025-09-06
 #
 # Description:
 #   A unified management tool for installing, upgrading, backing up, and restoring the
 #   n8n automation stack running on Docker Compose with Traefik + Let's Encrypt, supporting
-#   BOTH "single" mode and "queue" mode. For install, --mode defaults to "single". For other
-#   actions, the current mode is auto-detected from compose and containers.
+#   BOTH "single" mode and "queue" mode. For install, --mode defaults to "single".
+#
+#   This version adds:
+#     • Monitoring toggle via --monitoring (Prometheus, Grafana, exporters via Compose profiles)
+#     • Optional public Prometheus via --expose-prometheus (default private)
+#     • Base domain input (example.com), with subdomain defaults:
+#         - n8n.<domain>       for n8n
+#         - grafana.<domain>   for Grafana
+#         - prometheus.<domain> for Prometheus (if exposed)
+#       Overridable with:
+#         --subdomain-n8n, --subdomain-grafana, --subdomain-prometheus
+#     • DNS/TLS checks performed against the n8n FQDN only (subdomain-n8n.domain).
 #
 # Key features:
 #   - Install:
 #       * --mode {single|queue} (default: single) chooses template folder (single-mode/ or queue-mode/)
 #       * Validates DNS, installs Docker/Compose if missing, pins version, generates secrets
+#       * Optional monitoring profile & subdomains persisted into .env
 #       * Brings stack up, waits for health, prints a summary
 #   - Upgrade:
-#       * No mode needed; auto-detects from current compose
+#       * Auto-detects mode from compose
 #       * Pulls/validates target version, redeploys safely (downgrade with -f)
 #   - Backup / Restore:
 #       * No mode needed; discovers services, volumes, and containers dynamically
@@ -72,6 +83,19 @@ SSL_EMAIL=""
 N8N_VERSION="latest"
 FORCE_FLAG=false
 BACKUP_REQUIRE_TLS="${BACKUP_REQUIRE_TLS:-false}"
+
+# Monitoring & subdomain CLI overrides (defaults live in .env templates)
+MONITORING=false
+EXPOSE_PROMETHEUS=false
+SUBDOMAIN_N8N=""
+SUBDOMAIN_GRAFANA=""
+SUBDOMAIN_PROMETHEUS=""
+N8N_FQDN=""
+GRAFANA_FQDN=""
+PROMETHEUS_FQDN=""
+
+BASIC_AUTH_USER=""
+BASIC_AUTH_PASS=""
 
 # Backup/Restore
 TARGET_RESTORE_FILE=""
@@ -129,12 +153,12 @@ Actions (choose exactly one):
         List available n8n versions
 
   -i, --install <DOMAIN>
-        Install n8n with the given domain
+        Install n8n with the given base domain (e.g., example.com)
         Optional: --mode single|queue  (default: single)
         Optional: -v|--version <tag>
 
   -u, --upgrade <DOMAIN>
-        Upgrade n8n to target version (or latest)
+        Upgrade n8n to target version (or latest). Domain/FQDNs are read from .env.
 
   -b, --backup
         Run backup (skip if no changes unless -f)
@@ -161,19 +185,19 @@ Examples:
   $0 -a
       # List available versions
 
-  $0 --install n8n.example.com -m you@example.com
+  $0 --install example.com -m you@example.com
       # Install the latest n8n version with single mode
 
-  $0 --install n8n.example.com -m you@example.com -v 1.105.3 --mode queue
+  $0 --install example.com -m you@example.com -v 1.105.3 --mode queue
       # Install a specific n8n version with queue mode
 
-  $0 --install n8n.example.com -m you@example.com -d /path/to/n8n --mode queue
+  $0 --install example.com -m you@example.com -d /path/to/n8n --mode queue
       # Install the latest n8n version (queue mode) to a specific target directory
 
-  $0 --upgrade n8n.example.com
-      # Upgrade to the latest n8n version
+  $0 --upgrade
+      # Upgrade to the latest n8n version (domain/FQDNs read from .env)
 
-  $0 --upgrade n8n.example.com -f -v 1.107.2
+  $0 --upgrade -f -v 1.107.2
       # Upgrade to a specific n8n version
 
   $0 --backup --remote-name gdrive-user --email-to ops@example.com --notify-on-success
@@ -312,7 +336,7 @@ install_prereqs() {
     if command -v apt-get >/dev/null 2>&1; then
         log INFO "Installing common dependencies (jq, rsync, tar, msmtp-mta, dnsutils, openssl, pigz, vim)…"
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            jq rsync tar msmtp-mta dnsutils openssl pigz vim || true
+            jq rsync tar msmtp-mta dnsutils openssl pigz vim apache2-utils || true
     else
         log WARN "apt-get not found; skipping ancillary package installation."
     fi
@@ -331,6 +355,7 @@ install_prereqs() {
     if [[ "$CURRENT_USER" != "root" ]]; then
         log INFO "Adding user '$CURRENT_USER' to the 'docker' group (you may need to log out/in)…"
         usermod -aG docker "$CURRENT_USER" || true
+        log INFO "Tip: run 'newgrp docker' to activate group membership in the current shell."
     fi
 
     # Quick version notes
@@ -389,7 +414,7 @@ copy_templates_for_mode() {
     local src_dir=""
     case "$INSTALL_MODE" in
         single) src_dir="$TEMPLATE_SINGLE" ;;
-        queue)  src_dir="$TEMPLATE_QUEUE" ;;
+        queue)  src_dir="$TEMPLATE_QUEUE"  ;;
         *) log ERROR "--mode must be 'single' or 'queue'"; exit 2 ;;
     esac
 
@@ -425,7 +450,6 @@ copy_templates_for_mode() {
         exit 1
     }
 
-    # Pin the tag into .env (insert or update)
     log INFO "Installing n8n version: $target_version"
     log INFO "Updating .env with N8N_IMAGE_TAG=$target_version"
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
@@ -454,6 +478,58 @@ copy_templates_for_mode() {
         log INFO "Existing N8N_ENCRYPTION_KEY found. Not modifying it."
     fi
 
+    # Subdomains & monitoring flags persisted in .env
+    [[ -n "$SUBDOMAIN_N8N" ]]        && upsert_env_var "SUBDOMAIN_N8N" "$SUBDOMAIN_N8N" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_GRAFANA" ]]    && upsert_env_var "SUBDOMAIN_GRAFANA" "$SUBDOMAIN_GRAFANA" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_PROMETHEUS" ]] && upsert_env_var "SUBDOMAIN_PROMETHEUS" "$SUBDOMAIN_PROMETHEUS" "$ENV_FILE"
+
+    if $MONITORING; then
+        upsert_env_var "COMPOSE_PROFILES" "monitoring" "$ENV_FILE"
+        local mon_src="$SCRIPT_DIR/monitoring"
+        local mon_dst="$N8N_DIR/monitoring"
+        if [[ -d "$mon_src" ]]; then
+            mkdir -p "$mon_dst"
+            cp -a "$mon_src/." "$mon_dst/"
+            log INFO "Copied monitoring assets into $mon_dst"
+            if [[ ! -f "$mon_dst/prometheus.yml" ]]; then
+                log ERROR "Expected file not found: $mon_dst/prometheus.yml (is it missing or a directory?)"
+                exit 1
+            fi
+        else
+            log WARN "Monitoring enabled but $mon_src not found; Prometheus/Grafana may fail to start."
+        fi
+    else
+        upsert_env_var "COMPOSE_PROFILES" "" "$ENV_FILE"
+    fi
+
+    # Ensure Traefik basic auth variables are consistent (always run)
+    ensure_monitoring_auth
+
+    if $EXPOSE_PROMETHEUS; then
+        upsert_env_var "EXPOSE_PROMETHEUS" "true" "$ENV_FILE"
+    else
+        upsert_env_var "EXPOSE_PROMETHEUS" "false" "$ENV_FILE"
+    fi
+
+    # --- NEW: persist explicit FQDNs---
+    local base_dom sub_n8n sub_graf sub_prom
+    base_dom="$(read_env_var "$ENV_FILE" DOMAIN)"
+    sub_n8n="$(read_env_var "$ENV_FILE" SUBDOMAIN_N8N)"
+    sub_graf="$(read_env_var "$ENV_FILE" SUBDOMAIN_GRAFANA)"
+    sub_prom="$(read_env_var "$ENV_FILE" SUBDOMAIN_PROMETHEUS)"
+
+    sub_n8n="${sub_n8n:-n8n}"
+    sub_graf="${sub_graf:-grafana}"
+    sub_prom="${sub_prom:-prometheus}"
+
+    N8N_FQDN="${sub_n8n:+$sub_n8n.}${base_dom}"
+    GRAFANA_FQDN="${sub_graf:+$sub_graf.}${base_dom}"
+    PROMETHEUS_FQDN="${sub_prom:+$sub_prom.}${base_dom}"
+
+    upsert_env_var "N8N_FQDN" "$N8N_FQDN" "$ENV_FILE"
+    upsert_env_var "GRAFANA_FQDN" "$GRAFANA_FQDN" "$ENV_FILE"
+    upsert_env_var "PROMETHEUS_FQDN" "$PROMETHEUS_FQDN" "$ENV_FILE"
+
     # Secure secrets file
     chmod 600 "$ENV_FILE" || true
     chmod 640 "$COMPOSE_FILE" || true
@@ -479,28 +555,45 @@ copy_templates_for_mode() {
 #   0 on success; exits non-zero if any step fails.
 ################################################################################
 install_stack() {
-    [[ -n "$DOMAIN" ]] || { log ERROR "Install requires a domain."; exit 2; }
-    log INFO "Starting N8N installation for domain: $DOMAIN"
+    [[ -n "$DOMAIN" ]] || { log ERROR "Install requires a base domain."; exit 2; }
+
+    log INFO "Starting N8N installation for base domain: $DOMAIN"
+
     [[ -z "${SSL_EMAIL:-}" ]] && prompt_ssl_email
-    check_domain
     install_prereqs
     copy_templates_for_mode
-    validate_compose_and_env
     load_env_file
+    preflight_dns_checks
+    validate_compose_and_env
     discover_from_compose
-    # Ensure initial scale logic in docker_up_check applies on first boot
-    DISCOVERED_MODE="$([[ "$INSTALL_MODE" == "queue" ]] && echo queue || echo single)"
     ensure_external_volumes
+
     docker_up_check || { log ERROR "Stack unhealthy after install."; exit 1; }
+    post_up_tls_checks || true
+
+    # Summary
+    local graf_fqdn prom_fqdn expose_prom compose_profiles
+    graf_fqdn="$(read_env_var "$ENV_FILE" GRAFANA_FQDN || true)"
+    prom_fqdn="$(read_env_var "$ENV_FILE" PROMETHEUS_FQDN || true)"
+    expose_prom="$(read_env_var "$ENV_FILE" EXPOSE_PROMETHEUS || echo false)"
+    compose_profiles="$(read_env_var "$ENV_FILE" COMPOSE_PROFILES || true)"
 
     echo "═════════════════════════════════════════════════════════════"
     echo "N8N has been successfully installed!"
     box_line "Installation Mode:"       "$INSTALL_MODE"
-    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Domain (n8n):"           "https://${N8N_FQDN}"
+    if [[ "$compose_profiles" == *monitoring* ]]; then
+        box_line "Grafana:"             "https://${graf_fqdn}"
+        if [[ "${expose_prom,,}" == "true" ]]; then
+            box_line "Prometheus:"      "https://${prom_fqdn}"
+        else
+            box_line "Prometheus:"      "(internal only)"
+        fi
+    fi
     box_line "Installed Version:"       "$(get_current_n8n_version)"
     box_line "Install Timestamp:"       "${DATE}"
     box_line "Installed By:"            "${SUDO_USER:-$USER}"
-    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "Target Directory:"        "${N8N_DIR}"
     box_line "SSL Email:"               "${SSL_EMAIL:-N/A}"
     box_line "Execution log:"           "${LOG_FILE}"
     echo "═════════════════════════════════════════════════════════════"
@@ -526,21 +619,21 @@ install_stack() {
 upgrade_stack() {
     [[ -f "$ENV_FILE" && -f "$COMPOSE_FILE" ]] || { log ERROR "Compose/.env not found in $N8N_DIR"; exit 1; }
     load_env_file
-    log INFO "Checking current and latest n8n versions..."
+    ensure_monitoring_auth
+
+    log INFO "Checking current and target n8n versions..."
     cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
 
     local current_version target_version
     current_version=$(get_current_n8n_version || echo "0.0.0")
-    # Decide target version
+
     target_version="$N8N_VERSION"
     if [[ -z "$target_version" || "$target_version" == "latest" ]]; then
         target_version=$(get_latest_n8n_version)
         [[ -z "$target_version" ]] && { log ERROR "Could not determine latest n8n tag."; exit 1; }
     fi
-
     log INFO "Current version: $current_version  ->  Target version: $target_version"
 
-    # Refuse to downgrade unless -f
     if [[ "$(printf "%s\n%s" "$target_version" "$current_version" | sort -V | head -n1)" == "$target_version" \
           && "$target_version" != "$current_version" \
           && "$FORCE_FLAG" != true ]]; then
@@ -548,16 +641,12 @@ upgrade_stack() {
         exit 0
     fi
 
-    # If same version, allow redeploy only with -f
     if [[ "$target_version" == "$current_version" && "$FORCE_FLAG" != true ]]; then
         log INFO "Already on $current_version. Use -f to force redeploy."
         exit 0
     fi
 
-    # Validate tag exists (either registry)
     validate_image_tag "$target_version" || { log ERROR "Image tag not found: $target_version"; exit 1; }
-
-    # Pin the tag into .env (insert or update)
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
 
     log INFO "Stopping and removing existing containers..."
@@ -565,16 +654,18 @@ upgrade_stack() {
 
     validate_compose_and_env
     discover_from_compose
+
     docker_up_check || { log ERROR "Stack unhealthy after upgrade."; exit 1; }
+    post_up_tls_checks || true
 
     echo "═════════════════════════════════════════════════════════════"
     echo "N8N has been successfully upgraded!"
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Domain (n8n):"            "https://${N8N_FQDN}"
     box_line "Upgraded Version:"        "$(get_current_n8n_version)"
     box_line "Upgraded Timestamp:"      "${DATE}"
     box_line "Upgraded By:"             "${SUDO_USER:-$USER}"
-    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "Target Directory:"        "${N8N_DIR}"
     box_line "Execution log:"           "${LOG_FILE}"
     echo "═════════════════════════════════════════════════════════════"
 }
@@ -582,12 +673,11 @@ upgrade_stack() {
 ################################################################################
 # snapshot_bootstrap()
 # Description:
-#   Create the initial snapshot tree for change detection.
+#   Create (or refresh if missing) the initial snapshot tree for change detection.
 #
 # Behaviors:
-#   - Creates snapshot directories for each volume and for config.
+#   - Creates snapshot directories for each volume and for config if absent.
 #   - Rsyncs current data of volumes and config (.env, docker-compose.yml).
-#   - Skips if snapshot already exists.
 #
 # Returns:
 #   0 on success; non-zero on failure.
@@ -882,21 +972,6 @@ EOF
 }
 
 ################################################################################
-# can_send_email()
-# Description:
-#   Check whether SMTP config is sufficient to send email.
-#
-# Behaviors:
-#   - Verifies EMAIL_TO, SMTP_USER, SMTP_PASS are all non-empty.
-#
-# Returns:
-#   0 if all present; 1 otherwise.
-################################################################################
-can_send_email() {
-    [[ "$EMAIL_EXPLICIT" == true && -n "$SMTP_USER" && -n "$SMTP_PASS" && -n "$EMAIL_TO" ]]
-}
-
-################################################################################
 # send_email()
 # Description:
 #   Send a multipart email via Gmail SMTP (msmtp), optional attachment.
@@ -917,14 +992,9 @@ send_email() {
     local attachment="${3:-}"
 
     require_cmd msmtp || { log ERROR "msmtp not available; cannot send email."; return 1; }
-
-    if ! $EMAIL_EXPLICIT; then
-        # user never asked → silently skip
-        return 0
-    fi
-
-    if ! can_send_email; then
-        log ERROR "Email requested (-e) but SMTP_USER/SMTP_PASS not set → cannot send email."
+    if ! $EMAIL_EXPLICIT; then return 0; fi
+    if [[ -z "$SMTP_USER" || -z "$SMTP_PASS" || -z "$EMAIL_TO" ]]; then
+        log ERROR "Email requested (-e) but SMTP_USER/SMTP_PASS/EMAIL_TO not set → cannot send email."
         return 1
     fi
 
@@ -1111,10 +1181,12 @@ summarize_backup() {
         fi
     fi
 
+    local n8n_fqdn
+    n8n_fqdn="$(read_env_var "$ENV_FILE" N8N_FQDN)"
     echo "═════════════════════════════════════════════════════════════"
     echo "Backup completed!"
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://$DOMAIN"
+    box_line "Domain (n8n):"            "https://${n8n_fqdn}"
     box_line "Backup Action:"           "$ACTION"
     box_line "Backup Status:"           "$BACKUP_STATUS"
     box_line "Backup Timestamp:"        "$DATE"
@@ -1124,16 +1196,9 @@ summarize_backup() {
     box_line "Log File:"                "$LOG_FILE"
     box_line "Daily tracking:"          "$summary_file"
     case "$UPLOAD_STATUS" in
-        "SUCCESS")
-            box_line "Remote upload:"          "SUCCESS"
-            box_line "Remote folder link:"     "$DRIVE_LINK"
-            ;;
-        "SKIPPED")
-            box_line "Remote upload:" "SKIPPED"
-            ;;
-        *)
-            box_line "Remote upload:" "FAILED"
-            ;;
+        "SUCCESS") box_line "Remote upload:" "SUCCESS"; box_line "Remote folder link:" "$DRIVE_LINK" ;;
+        "SKIPPED") box_line "Remote upload:" "SKIPPED" ;;
+        *)         box_line "Remote upload:" "FAILED"  ;;
     esac
     if [[ -n "$email_reason" ]]; then
         box_line "Email notification:" "$email_status $email_reason"
@@ -1184,7 +1249,7 @@ backup_stack() {
     wait_for_containers_healthy || return 1
 
     if [[ "$BACKUP_REQUIRE_TLS" == "true" ]]; then
-        verify_traefik_certificate "$DOMAIN" || return 1
+        verify_traefik_certificate "$N8N_FQDN" || return 1
     fi
 
     if do_local_backup; then
@@ -1192,6 +1257,7 @@ backup_stack() {
         log INFO "Local backup succeeded: $BACKUP_FILE"
         # Refresh our snapshot so next run sees “no changes”
         snapshot_refresh
+        write_summary_row "$ACTION" "$BACKUP_STATUS"
     else
         BACKUP_STATUS="FAIL"
         log ERROR "Local backup failed."
@@ -1207,10 +1273,6 @@ backup_stack() {
     else
         UPLOAD_STATUS="SKIPPED"
     fi
-
-    # Record in rolling summary
-    # cache the Google Drive (remote) link exactly once
-
 
     # cache the Google Drive link exactly once
     DRIVE_LINK="$(get_google_drive_link)"
@@ -1279,6 +1341,64 @@ fetch_remote_if_needed() {
 }
 
 ################################################################################
+# ensure_db_role_exists()
+# Description:
+#   Ensure a Postgres role exists (LOGIN); no password is set here.
+#   Avoids failures when recreating a DB with OWNER=<role> that doesn't exist.
+#
+# Args:
+#   $1 -> PG_CID     : postgres container id/name
+#   $2 -> ADMIN_USER : superuser to run DDL (e.g., "postgres")
+#   $3 -> ADMIN_PASS : password for ADMIN_USER (may be empty for peer/trust)
+#   $4 -> ROLE_NAME  : role to ensure exists
+#
+# Returns:
+#   0 on success.
+################################################################################
+ensure_db_role_exists() {
+    local pgcid="$1" admin="$2" pass="$3" role="$4"
+    docker exec -e PGPASSWORD="$pass" -i "$pgcid" psql -U "$admin" -d postgres -v ON_ERROR_STOP=1 -c \
+"DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN', '${role}');
+  END IF;
+END
+\$\$;"
+}
+
+################################################################################
+# drop_and_create_db()
+# Description:
+#   Drop the target database (terminating active sessions) and create it again
+#   owned by DB_OWNER inside the running Postgres container.
+#
+# Args:
+#   $1 -> PG_CID     : postgres container id/name (from docker compose)
+#   $2 -> ADMIN_USER : superuser to run DDL (e.g., "postgres")
+#   $3 -> ADMIN_PASS : password for ADMIN_USER (may be empty for peer/trust)
+#   $4 -> DB_NAME    : database to (re)create
+#   $5 -> DB_OWNER   : role to own the new database (must already exist)
+#
+# Behaviors:
+#   - Best-effort terminates active backends before DROP (errors ignored).
+#   - Executes: DROP DATABASE IF EXISTS <db>; CREATE DATABASE <db> OWNER <owner>.
+#   - Uses ON_ERROR_STOP=1 so DROP/CREATE failures propagate non-zero.
+#   - Does not create DB_OWNER; assumes the role exists.
+#   - Uses cluster defaults for encoding/locale/template.
+#
+# Returns:
+#   0 on success; non-zero if DROP or CREATE fails.
+################################################################################
+drop_and_create_db() {
+    local pgcid="$1" admin="$2" pass="$3" db="$4" owner="$5"
+    docker exec -e PGPASSWORD="$pass" -i "$pgcid" psql -U "$admin" -d postgres -v ON_ERROR_STOP=1 -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" || true
+    docker exec -e PGPASSWORD="$pass" -i "$pgcid" psql -U "$admin" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${db};"
+    docker exec -e PGPASSWORD="$pass" -i "$pgcid" psql -U "$admin" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${db} OWNER ${owner};"
+}
+
+################################################################################
 # restore_stack()
 # Description:
 #   Restore the n8n stack from a backup archive (configs, volumes, database).
@@ -1287,7 +1407,7 @@ fetch_remote_if_needed() {
 #   - Fetches remote archive if needed; extracts to temp dir.
 #   - Validates .env.bak (with N8N_ENCRYPTION_KEY) and docker-compose.yml.bak,
 #     then restores them to N8N_DIR and reloads env.
-#   - Stops stack (compose down --volumes --remove-orphans).
+#   - Stops stack (compose down --remove-orphans), then explicitly removes/recreates volumes.
 #   - If DB dump (*.dump or *.sql) present → skip postgres-data volume restore.
 #   - Recreates and restores non-DB volumes from their tarballs.
 #   - Starts postgres, waits healthy, then:
@@ -1452,27 +1572,20 @@ restore_stack() {
     local ADMIN_PASS="$(_read_env_var_from_container "$PG_CID" POSTGRES_PASSWORD)"
 
     local POSTGRES_RESTORE_MODE=""
+    # Ensure owner role exists to avoid CREATE DATABASE OWNER failures
+    ensure_db_role_exists "$PG_CID" "$ADMIN_USER" "$ADMIN_PASS" "$DB_USER"
 
     if [[ -n "$dump_file" ]]; then
         POSTGRES_RESTORE_MODE="dump"
         log INFO "Custom dump found: $(basename "$dump_file"). Restoring via pg_restore..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        drop_and_create_db "$PG_CID" "$ADMIN_USER" "$ADMIN_PASS" "$DB_NAME" "$DB_USER"
         docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" pg_restore -U "$ADMIN_USER" -d "${DB_NAME}" -c -v < "$dump_file"
-
-
     elif [[ -n "$sql_file" ]]; then
         POSTGRES_RESTORE_MODE="sql"
         log INFO "SQL dump found: $(basename "$sql_file"). Restoring via psql..."
         log INFO "Recreate database ${DB_NAME}..."
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        drop_and_create_db "$PG_CID" "$ADMIN_USER" "$ADMIN_PASS" "$DB_NAME" "$DB_USER"
         docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
     else
         POSTGRES_RESTORE_MODE="volume"
@@ -1482,7 +1595,9 @@ restore_stack() {
     # When the PostgreSQL DB is ready, start other containers
     log INFO "Starting the rest of the stack..."
     ensure_external_volumes
+
     docker_up_check || { log ERROR "Stack unhealthy after restore."; return 1; }
+    post_up_tls_checks || true
 
     log INFO "Cleaning up..."
     rm -rf "$restore_dir"
@@ -1505,7 +1620,7 @@ restore_stack() {
     echo "═════════════════════════════════════════════════════════════"
     echo "Restore completed successfully."
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://$DOMAIN"
+    box_line "Domain (n8n):"            "https://${N8N_FQDN}"
     box_line "Restore from file:"       "$requested_spec"
     box_line "Local archive used:"      "$TARGET_RESTORE_FILE"
     box_line "Restore Timestamp:"       "$DATE"
@@ -1614,11 +1729,9 @@ cleanup_stack() {
 #   0 on success; exits 1 on invalid usage.
 ################################################################################
 parse_args() {
-    # Define short/long specs
-    SHORT="i:u:v:m:cbad:l:r:e:ns:fh"
-    LONG="install:,upgrade:,version:,ssl-email:,cleanup,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:"
+    SHORT="i:u::v:m:cbad:l:r:e:ns:fh"
+    LONG="install:,upgrade::,version:,ssl-email:,cleanup,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
 
-    # Parse
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
 
@@ -1627,80 +1740,60 @@ parse_args() {
             -i|--install)
                 DO_INSTALL=true
                 DOMAIN="$(parse_domain_arg "$2")"
-                shift 2
-                ;;
+                shift 2 ;;
             -u|--upgrade)
                 DO_UPGRADE=true
-                DOMAIN="$(parse_domain_arg "$2")"
-                shift 2
-                ;;
+                # optional domain parameter ignored; we read from .env
+                if [[ "$2" != "--" && "$2" != "-"* ]]; then shift 2; else shift; fi ;;
             -v|--version)
-                N8N_VERSION="$2"
-                shift 2
-                ;;
+                N8N_VERSION="$2"; shift 2 ;;
             -m|--ssl-email)
-                SSL_EMAIL="$2"
-                shift 2
-                ;;
+                SSL_EMAIL="$2"; shift 2 ;;
             -c|--cleanup)
-                DO_CLEANUP=true
-                shift
-                ;;
+                DO_CLEANUP=true; shift ;;
             -b|--backup)
-                DO_BACKUP=true
-                shift
-                ;;
+                DO_BACKUP=true; shift ;;
             -a|--available)
-                DO_AVAILABLE=true
-                shift
-                ;;
+                DO_AVAILABLE=true; shift ;;
             -d|--dir)
-                N8N_DIR="$2"
-                shift 2
-                ;;
+                N8N_DIR="$2"; shift 2 ;;
             -l|--log-level)
-                LOG_LEVEL="${2^^}"
-                shift 2
-                ;;
+                LOG_LEVEL="${2^^}"; shift 2 ;;
             -r|--restore)
-                DO_RESTORE=true
-                TARGET_RESTORE_FILE="$2"
-                shift 2
-                ;;
+                DO_RESTORE=true; TARGET_RESTORE_FILE="$2"; shift 2 ;;
             -e|--email-to)
-                EMAIL_TO="$2"; EMAIL_EXPLICIT=true
-                shift 2
-                ;;
+                EMAIL_TO="$2"; EMAIL_EXPLICIT=true; shift 2 ;;
             -n|--notify-on-success)
-                NOTIFY_ON_SUCCESS=true
-                shift
-                ;;
+                NOTIFY_ON_SUCCESS=true; shift ;;
             -s|--remote-name)
-                RCLONE_REMOTE="$2"
-                shift 2
-                ;;
+                RCLONE_REMOTE="$2"; shift 2 ;;
             --mode)
-                INSTALL_MODE="$2"
-                shift 2
-                ;;
+                INSTALL_MODE="$2"; shift 2 ;;
+            --monitoring)
+                MONITORING=true; shift ;;
+            --expose-prometheus)
+                EXPOSE_PROMETHEUS=true; shift ;;
+            --subdomain-n8n)
+                SUBDOMAIN_N8N="$2"; shift 2 ;;
+            --subdomain-grafana)
+                SUBDOMAIN_GRAFANA="$2"; shift 2 ;;
+            --subdomain-prometheus)
+                SUBDOMAIN_PROMETHEUS="$2"; shift 2 ;;
+            --basic-auth-user)
+                BASIC_AUTH_USER="$2"; shift 2 ;;
+            --basic-auth-pass)
+                BASIC_AUTH_PASS="$2"; shift 2 ;;
             -f|--force)
-                FORCE_FLAG=true
-                shift
-                ;;
+                FORCE_FLAG=true; shift ;;
             -h|--help)
-                usage
-                ;;
+                usage ;;
             --)
-                shift
-                break
-                ;;
+                shift; break ;;
             *)
-                usage
-                ;;
+                usage ;;
         esac
     done
 
-    # Enforce single action
     local count=0
     $DO_INSTALL   && ((count+=1))
     $DO_UPGRADE   && ((count+=1))
@@ -1710,7 +1803,6 @@ parse_args() {
     $DO_AVAILABLE && ((count+=1))
     (( count == 1 )) || { log ERROR "Choose exactly one action."; usage; }
 
-    # Normalize mode default for install
     if $DO_INSTALL; then
         case "$INSTALL_MODE" in
             single|queue) ;;

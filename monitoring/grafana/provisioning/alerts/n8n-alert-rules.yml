@@ -1,0 +1,19 @@
+groups:
+  - name: n8n-alerts
+    rules:
+      - alert: HighN8NWaitingExecutions
+        expr: n8n_queue_jobs_waiting > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of waiting executions in n8n"
+          description: "There are more than 100 jobs waiting in the queue."
+      - alert: HighN8NFailedExecutions
+        expr: n8n_queue_jobs_failed > 10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "n8n has too many failed executions"
+          description: "Failed jobs detected: more than 10."
