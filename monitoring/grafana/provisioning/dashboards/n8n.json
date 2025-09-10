@@ -730,7 +730,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Memory – RSS vs Virtual",
+      "title": "Memory \u2013 RSS vs Virtual",
       "id": 19,
       "datasource": {
         "type": "prometheus",
@@ -776,7 +776,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Event loop lag (current / p50 / p99 / max)",
+      "title": "Event loop lag p99 (or gauge fallback)",
       "id": 20,
       "datasource": {
         "type": "prometheus",
@@ -809,23 +809,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (instance) (n8n_nodejs_eventloop_lag_seconds{job=\"$job\", instance=~\"$instance\"}) or max by (instance) (nodejs_eventloop_lag_seconds{job=\"$job\", instance=~\"$instance\"})",
-          "legendFormat": "{{instance}} current"
-        },
-        {
-          "refId": "B",
-          "expr": "max by (instance) (n8n_nodejs_eventloop_lag_p50_seconds{job=\"$job\", instance=~\"$instance\"})",
-          "legendFormat": "{{instance}} p50"
-        },
-        {
-          "refId": "C",
           "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(nodejs_eventloop_lag_seconds_bucket{job=\"$job\", instance=~\"$instance\"}[5m]))) or max by (instance) (n8n_nodejs_eventloop_lag_p99_seconds{job=\"$job\", instance=~\"$instance\"}) or max by (instance) (nodejs_eventloop_lag_seconds{job=\"$job\", instance=~\"$instance\"})",
           "legendFormat": "{{instance}} p99"
-        },
-        {
-          "refId": "D",
-          "expr": "max by (instance) (n8n_nodejs_eventloop_lag_max_seconds{job=\"$job\", instance=~\"$instance\"})",
-          "legendFormat": "{{instance}} max"
         }
       ],
       "pluginVersion": "12.0.0"
@@ -872,11 +857,6 @@
           "refId": "B",
           "expr": "n8n_nodejs_heap_size_total_bytes{job=\"$job\", instance=~\"$instance\"}",
           "legendFormat": "{{instance}} total"
-        },
-        {
-          "refId": "C",
-          "expr": "n8n_nodejs_external_memory_bytes{job=\"$job\", instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} external"
         }
       ],
       "pluginVersion": "12.0.0"
@@ -997,365 +977,6 @@
         }
       ],
       "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "table",
-      "title": "Version Information (n8n & Node.js)",
-      "id": 25,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 24,
-        "x": 0,
-        "y": 49
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "targets": [
-        {
-          "expr": "n8n_version_info{job=\"$job\", instance=~\"$instance\"}",
-          "format": "table",
-          "instant": true,
-          "interval": "",
-          "legendFormat": "",
-          "refId": "A"
-        },
-        {
-          "expr": "n8n_nodejs_version_info{job=\"$job\", instance=~\"$instance\"}",
-          "format": "table",
-          "instant": true,
-          "interval": "",
-          "legendFormat": "",
-          "refId": "B"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Value #A": true,
-              "Value #B": true,
-              "__name__": true
-            },
-            "renameByName": {
-              "job": "Job",
-              "instance": "Instance",
-              "major": "Major",
-              "minor": "Minor",
-              "patch": "Patch",
-              "version": "Version"
-            }
-          }
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "timeseries",
-      "title": "Heap Space Used",
-      "id": 26,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 55
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "n8n_nodejs_heap_space_size_used_bytes{job=\"$job\", instance=~\"$instance\"}",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{space}}",
-          "refId": "A"
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "timeseries",
-      "title": "Heap Space Available",
-      "id": 27,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 55
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "n8n_nodejs_heap_space_size_available_bytes{job=\"$job\", instance=~\"$instance\"}",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{space}}",
-          "refId": "A"
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "timeseries",
-      "title": "File Descriptors (open vs max)",
-      "id": 28,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 61
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "n8n_process_open_fds{job=\"$job\", instance=~\"$instance\"}",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{instance}} open",
-          "refId": "A"
-        },
-        {
-          "expr": "n8n_process_max_fds{job=\"$job\", instance=~\"$instance\"}",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{instance}} max",
-          "refId": "B"
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "table",
-      "title": "Active Workflows (by instance)",
-      "id": 29,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 61
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "targets": [
-        {
-          "expr": "n8n_active_workflow_count{job=\"$job\", instance=~\"$instance\"}",
-          "format": "table",
-          "instant": true,
-          "interval": "",
-          "legendFormat": "",
-          "refId": "A"
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "timeseries",
-      "title": "GC Duration (5m rate) by kind",
-      "id": 30,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 67
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(n8n_nodejs_gc_duration_seconds_sum{job=\"$job\", instance=~\"$instance\"}[5m])) by (kind)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{kind}}",
-          "refId": "A"
-        }
-      ],
-      "pluginVersion": "12.0.0"
-    },
-    {
-      "type": "timeseries",
-      "title": "GC Count (5m rate) by kind",
-      "id": 31,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROM}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 67
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(n8n_nodejs_gc_duration_seconds_count{job=\"$job\", instance=~\"$instance\"}[5m])) by (kind)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{kind}}",
-          "refId": "A"
-        }
-      ],
-      "pluginVersion": "12.0.0"
     }
   ],
   "preload": false,
@@ -1407,9 +1028,9 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "n8n – Queue Mode Health & Performance (Full)",
+  "title": "n8n \u2013 Queue Mode Health & Performance (Full)",
   "uid": "n8n-queue-full-001",
-  "version": 2,
+  "version": 1,
   "__inputs": [
     {
       "name": "DS_PROM",
@@ -1442,12 +1063,6 @@
       "type": "panel",
       "id": "barchart",
       "name": "Bar chart",
-      "version": "8.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "table",
-      "name": "Table",
       "version": "8.0.0"
     },
     {
