@@ -1,23 +1,24 @@
 # n8n Manager — Install • Upgrade • Backup • Restore • Monitor (Single or Queue Mode)
 
-A production-ready way to **install**, **upgrade**, **back up**, **restore**, and **monitor** a self-hosted [n8n](https://n8n.io) stack on Docker — with **Traefik** (HTTPS & reverse proxy), **PostgreSQL** (persistence), optional **Queue Mode** (Redis + workers), and a turnkey observability stack **(Prometheus + Grafana)** you can enable with a flag.  
-Everything is driven by one script: `n8n_manager.sh`.
+**n8n Manager** is the all-in-one Bash CLI for fast, secure, and reliable n8n stack operations—**install**, **upgrade**, **backup**, **restore**, and **monitor** with a single script.
+
+> Production-ready for Docker, with HTTPS (Traefik), PostgreSQL, Redis (Queue Mode), and a plug-and-play Prometheus & Grafana observability stack.
 
 ---
 
 ## Table of Contents
 
+- [Why Use This?](#why-use-this)
 - [Highlights](#highlights)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-  - [Get the Repository](#get-the-repository)
-  - [CLI Overview](#cli-overview)
-  - [Install (Single or Queue Mode)](#install-single-or-queue-mode)
-  - [Upgrade](#upgrade)
-  - [Backup](#backup)
-  - [Restore](#restore)
-  - [Cleanup](#cleanup)
+- [CLI Overview](#cli-overview)
+- [Install (Single or Queue Mode)](#install-single-or-queue-mode)
+- [Upgrade](#upgrade)
+- [Backup](#backup)
+- [Restore](#restore)
+- [Cleanup](#cleanup)
 - [Monitoring (Prometheus & Grafana)](#monitoring-prometheus--grafana)
 - [Queue Mode basics](#queue-mode-basics)
 - [Scheduling Daily Backups](#scheduling-daily-backups)
@@ -25,6 +26,22 @@ Everything is driven by one script: `n8n_manager.sh`.
 - [Troubleshooting & FAQs](#troubleshooting--faqs)
 - [Security Notes](#security-notes)
 - [Support](#support)
+- [Contribution](#contribution)
+- [License](#license)
+- [Related Projects](#related-projects)
+
+---
+
+## Why Use This?
+
+- **No Docker Compose experience needed:** One script does it all!
+- **Queue Mode & single mode:** Deploy for scale or simplicity.
+- **Secure by default:** HTTPS, strong secrets, basic auth.
+- **Fast backup & restore:** Local and cloud options.
+- **Turnkey monitoring:** Enable Prometheus & Grafana with a flag.
+- **Email notifications:** Know when backups succeed or fail.
+- **Full logging & health checks:** For every operation.
+- **Works on any modern Linux server.**
 
 ---
 
@@ -128,7 +145,7 @@ chmod +x *.sh
 
 ---
 
-### CLI Overview
+## CLI Overview
 
 ```text
 Usage: ./n8n_manager.sh [ONE ACTION] [OPTIONS]
@@ -168,7 +185,7 @@ Options:
 
 ---
 
-### Install (Single or Queue Mode)
+## Install (Single or Queue Mode)
 
 > Before running install, ensure your domain’s A record points to this server.
 
@@ -243,7 +260,7 @@ Execution log:           /home/n8n/logs/install_n8n_2025-09-09_15-22-05.log
 
 ---
 
-### Upgrade
+## Upgrade
 
 **See newer versions:**
 ```bash
@@ -286,7 +303,7 @@ Execution log:           /home/n8n/logs/upgrade_n8n_2025-09-04_15-26-26.log
 
 ---
 
-### Backup
+## Backup
 
 Backups include:
 
@@ -351,7 +368,7 @@ Email notification:      SKIPPED (not requested)
 
 ---
 
-### Restore
+## Restore
 
 **From a local archive:**
 ```bash
@@ -392,7 +409,7 @@ PostgreSQL:              Restored from SQL file (.sql)
 
 ---
 
-### Cleanup
+## Cleanup
 
 ```bash
 # Safe: keep TLS certs, keep base images, keep target dir (default /home/n8n)
@@ -674,3 +691,26 @@ It’s internal by default. Set `EXPOSE_PROMETHEUS=true` (or pass `--expose-prom
 
 - Open an issue in the repository, or  
 - Email **thenguyen.ai.automation@gmail.com**
+
+---
+
+## Contribution
+
+Contributions, suggestions, and bug reports are welcome!  
+- Fork and submit a PR  
+- Open an issue for feature requests or problems  
+
+---
+
+## License
+
+This project is MIT licensed.  
+See [LICENSE](./LICENSE) for details.
+
+---
+
+## Related Projects
+
+- [n8n Documentation](https://docs.n8n.io)
+- [n8n-observability](https://github.com/thenguyenvn90/n8n-observability)
+- [n8n-queue-mode](https://github.com/thenguyenvn90/n8n-queue-mode)
