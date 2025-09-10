@@ -3,7 +3,7 @@ services:
     image: traefik:v2.11
     restart: unless-stopped
     command:
-      - "--api.dashboard=true"
+      - "--api.dashboard=false"
       # EntryPoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -50,8 +50,7 @@ services:
   postgres:
     image: postgres:14
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
@@ -82,8 +81,7 @@ services:
   main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       - N8N_METRICS=true
       - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
@@ -109,9 +107,9 @@ services:
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=le"
-      # Bind router -> this service name (avoid port clashes)
-      - "traefik.http.routers.n8n.service=n8n-main"
-      - "traefik.http.services.n8n-main.loadbalancer.server.port=5678"
+      # Traefik 'service' label name
+      - "traefik.http.routers.n8n.service=main"
+      - "traefik.http.services.main.loadbalancer.server.port=5678"
       # Middlewares
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
       - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
@@ -132,8 +130,7 @@ services:
   runner-main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       - N8N_METRICS=true
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
@@ -150,8 +147,7 @@ services:
   worker:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       - N8N_METRICS=true
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
@@ -178,6 +174,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     labels:
       - "traefik.enable=${EXPOSE_PROMETHEUS:-false}"
       - "traefik.docker.network=n8n-network"
@@ -207,6 +204,7 @@ services:
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./monitoring/grafana/provisioning/alerts:/etc/grafana/provisioning/alerts:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=n8n-network"
@@ -234,6 +232,7 @@ services:
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     depends_on:
       postgres:
         condition: service_healthy
@@ -246,6 +245,7 @@ services:
       - "--redis.addr=redis:6379"
       - "--redis.password=${STRONG_PASSWORD}"
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     depends_on:
       redis:
         condition: service_healthy
@@ -261,6 +261,7 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
   node-exporter:
     profiles: ["monitoring"]
@@ -273,9 +274,10 @@ services:
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--path.rootfs=/rootfs'
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+    security_opt: [no-new-privileges:true]
 
 networks:
   n8n-network:
