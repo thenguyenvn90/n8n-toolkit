@@ -3,7 +3,7 @@ services:
     image: traefik:v2.11
     restart: unless-stopped
     command:
-      - "--api.dashboard=true"
+      - "--api.dashboard=false"
       # EntryPoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -39,6 +39,7 @@ services:
       - letsencrypt:/letsencrypt
       - ./secrets/htpasswd:/etc/traefik/htpasswd:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
       interval: 10s
@@ -49,11 +50,11 @@ services:
   postgres:
     image: postgres:14
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       interval: 10s
@@ -61,11 +62,11 @@ services:
       start_period: 20s
       retries: 5
 
+  # n8n (single mode)
   main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       - N8N_METRICS=true
     volumes:
@@ -90,7 +91,10 @@ services:
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=le"
+      # Bind the router to the named Traefik service defined below
+      - "traefik.http.routers.n8n.service=n8n"
       - "traefik.http.services.n8n.loadbalancer.server.port=${N8N_PORT:-5678}"
+      # Middlewares
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
       # Security headers
       - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
@@ -107,7 +111,7 @@ services:
       - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
       - "traefik.http.middlewares.n8n-compress.compress=true"
 
- # ===== Monitoring (enabled by COMPOSE_PROFILES=monitoring) =====
+  # ===== Monitoring (enabled by COMPOSE_PROFILES=monitoring) =====
   prometheus:
     profiles: ["monitoring"]
     image: prom/prometheus:latest
@@ -119,6 +123,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     labels:
       - "traefik.enable=${EXPOSE_PROMETHEUS:-false}"
       - "traefik.docker.network=n8n-network"
@@ -148,6 +153,7 @@ services:
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./monitoring/grafana/provisioning/alerts:/etc/grafana/provisioning/alerts:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=n8n-network"
@@ -156,11 +162,9 @@ services:
       - "traefik.http.routers.grafana.tls=true"
       - "traefik.http.routers.grafana.tls.certresolver=le"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
-      # PROXY BASIC AUTH (usersFile)
       - "traefik.http.routers.grafana.middlewares=grafana-auth@docker,secure-headers@docker"
       - "traefik.http.middlewares.grafana-auth.basicauth.usersfile=${TRAEFIK_USERSFILE}"
       - "traefik.http.middlewares.grafana-auth.basicauth.removeheader=true"
-      # Optional hardening (HSTS, XSS protection, etc.)
       - "traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000"
       - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
       - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
@@ -175,6 +179,7 @@ services:
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     depends_on:
       postgres:
         condition: service_healthy
@@ -190,21 +195,23 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
   node-exporter:
     profiles: ["monitoring"]
     image: prom/node-exporter:latest
     restart: unless-stopped
     pid: "host"
-    network_mode: "host"
+    networks: [n8n-network]
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--path.rootfs=/rootfs'
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+    security_opt: [no-new-privileges:true]
 
 networks:
   n8n-network:
