@@ -86,6 +86,7 @@ services:
       - .env
     environment:
       - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -149,6 +150,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - N8N_METRICS=true
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
@@ -262,7 +265,7 @@ services:
     image: prom/node-exporter:latest
     restart: unless-stopped
     pid: "host"
-    network_mode: "host"
+    networks: [n8n-network]
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro

@@ -1,6 +1,6 @@
-# n8n Manager — Install • Upgrade • Backup • Restore (Single or Queue Mode)
+# n8n Manager — Install • Upgrade • Backup • Restore • Monitor (Single or Queue Mode)
 
-A production-ready way to **install**, **upgrade**, **back up**, and **restore** a self-hosted [n8n](https://n8n.io) stack on Docker — with **Traefik** (HTTPS & reverse proxy), **PostgreSQL** (persistence), and optional **Queue Mode** (Redis + workers).  
+A production-ready way to **install**, **upgrade**, **back up**, and **restore**, and minitor a self-hosted [n8n](https://n8n.io) stack on Docker — with **Traefik** (HTTPS & reverse proxy), **PostgreSQL** (persistence), and optional **Queue Mode** (Redis + workers) and a turnkey observability stack **(Prometheus + Grafana)** you can enable with a flag.
 Everything is driven by one script: `n8n_manager.sh`.
 
 ---
@@ -18,26 +18,26 @@ Everything is driven by one script: `n8n_manager.sh`.
   - [Backup](#backup)
   - [Restore](#restore)
   - [Cleanup](#cleanup)
-- [Queue Mode knowledge](#queue-mode-knowledge)
+- [Monitoring (Prometheus & Grafana)](#monitoring-prometheus--grafana)
+- [Queue Mode basics](#queue-mode-basics)
 - [Scheduling Daily Backups](#scheduling-daily-backups)
-- [Where to check logs](#where-to-check-logs)
 - [Logs & Health](#logs--health)
 - [Troubleshooting & FAQs](#troubleshooting--faqs)
 - [Security Notes](#security-notes)
 - [Support](#support)
-
 ---
 
 ## Highlights
 
-- **One script, all tasks** — install, upgrade, backup/restore, and cleanup in a single CLI.
+- **One script, all tasks** — install, upgrade, backup/restore, cleanup, and **monitoring** in a single CLI.
 - **Mode-aware** — deploy **Single** or **Queue** mode; upgrades auto-detect the current mode.
-- **Secure by default** — Traefik + Let’s Encrypt (auto-renew), strong secrets, HTTPS everywhere.
+- **Built-in observability** — enable **Prometheus + Grafana** with `--monitoring`, pre-provisioned dashboards & alert rules.
+- **Secure by default** — Traefik + Let’s Encrypt (auto-renew), strong secrets, HTTPS everywhere; Traefik **Basic Auth** in front of Grafana/Prometheus.
 - **Resilient data** — PostgreSQL + persistent volumes; deterministic restores preserve workflows & credentials.
 - **Smart version picker** — lists latest stable (or newer-than-current when running) with image tag validation.
 - **Change-aware backups** — skip when nothing changed (use `-f` to force).
-- **Fast, verifiable archives** — compression with `pigz` when available and SHA-256 checksums; retention pruning built-in.
-- **One-command restore** — from local file or any `rclone` remote; deterministic DB rebuild (SQL dump or volume) and post-restore health checks.
+- **Fast, verifiable archives** — `pigz` compression and SHA-256 checksums; built-in local + remote retention.
+- **One-command restore** — from local file or any `rclone` remote; DB restore from dump or volume; post-restore health checks.
 - **Off-site ready** — upload archives & checksums to Google Drive or any `rclone` remote, with remote pruning.
 - **Email notifications** — Gmail SMTP via `msmtp`; attach logs on failure (optional on success).
 - **Strong UX & logging** — per-run logs under `logs/`, `--log-level DEBUG` tracing, graceful error/interrupt traps, and a rolling `backups/backup_summary.md` dashboard.
@@ -48,25 +48,38 @@ Everything is driven by one script: `n8n_manager.sh`.
 
 ```
 .
-├── n8n_manager.sh                 # Main script (install/upgrade/backup/restore/cleanup)
-├── common.sh                      # Shared helpers used by the manager
+├── n8n_manager.sh                      # Main script (install/upgrade/backup/restore/cleanup)
+├── common.sh                           # Shared helpers used by the manager
+├── monitoring                          # Monitoring configuration
+│   ├── grafana
+│   │   └── provisioning
+│   │       ├── alerts
+│   │       │   ├── n8n-alert-rules.yml
+│   │       │   └── system-alert-rules.yml
+│   │       ├── dashboards
+│   │       │   ├── dashboards.yml
+│   │       │   └── n8n.json
+│   │       └── datasources
+│   │           └── datasource.yml
+│   └── prometheus.yml
 ├── single-mode/
-│   ├── docker-compose.yml         # Compose template (single-container n8n)
-│   └── .env                       # Template env for single mode
+│   ├── docker-compose.yml              # Compose template (single-container n8n)
+│   └── .env                            # Template env for single mode
 ├── queue-mode/
-│   ├── docker-compose.yml         # Compose template (main + redis + workers)
-│   └── .env                       # Template env for queue mode
+│   ├── docker-compose.yml              # Compose template (main + redis + workers)
+│   └── .env                            # Template env for queue mode
 └── (created at runtime)
-    ├── /home/n8n/logs/            # All run logs (or your chosen --dir)
+    ├── /home/n8n/logs/                 # All run logs (or your chosen --dir)
     │   ├── install_n8n_<ts>.log
     │   ├── upgrade_n8n_<ts>.log
     │   ├── backup_n8n_<ts>.log
     │   ├── restore_n8n_<ts>.log
-    │   └── latest_<action>.log    # symlink per action (install/upgrade/backup/restore/cleanup)
-    └── /home/n8n/backups/         # Backup archives, checksums, summary, snapshot
+    │   └── latest_<action>.log         # symlink per action (install/upgrade/backup/restore/cleanup)
+    └── /home/n8n/backups/              # Backup archives, checksums, summary, snapshot
+    └── /home/n8n/monitoring/           # copied when --monitoring is enabled
 ```
 
-> **Templates:** Installation copies the selected template (`single-mode/` or `queue-mode/`) into your target directory and pins your chosen **n8n version**, **domain**, **SSL email**, and **secrets**.
+> **Templates:** Installation copies the selected template (`single-mode/` or `queue-mode/`) into your target directory and pins your chosen **n8n version**, **domain**, **SSL email**, and **secrets**, and (optionally) copies monitoring/ for Prometheus/Grafana.
 
 ---
 
@@ -127,24 +140,32 @@ Note: After unzipping, GitHub appends -main to the folder name. Instead of n8n-t
 Usage: ./n8n_manager.sh [ONE ACTION] [OPTIONS]
 
 Actions (choose exactly one):
-  -a, --available                 List available n8n versions
-  -i, --install <DOMAIN>          Install n8n for <DOMAIN>
-  -u, --upgrade <DOMAIN>          Upgrade n8n for <DOMAIN>
-  -b, --backup                    Run backup (skip if unchanged unless -f)
-  -r, --restore <FILE_OR_REMOTE>  Restore from local file or rclone remote
-  -c, --cleanup                   Stop stack and remove resources (interactive)
+  -a, --available                     List available n8n versions
+  -i, --install <DOMAIN>              Install n8n for <DOMAIN>
+  -u, --upgrade                       Upgrade n8n in the chosen --dir (reads .env)
+  -b, --backup                        Run backup (skip if unchanged unless -f)
+  -r, --restore <FILE_OR_REMOTE>      Restore from local file or rclone remote
+  -c, --cleanup <safe|all>            Stop stack & remove resources (preview; confirm in 'all')
 
 Options:
-  --mode <single|queue>           Install mode (default: single)   [install only]
-  -v, --version <tag>             n8n image tag (default: latest stable)
-  -m, --ssl-email <email>         Email for Let's Encrypt
-  -d, --dir <path>                Target directory (default: /home/n8n)
-  -l, --log-level <LEVEL>         DEBUG | INFO (default) | WARN | ERROR
-  -f, --force                     Force backup or downgrade/redeploy
-  -e, --email-to <email>          Send notifications to this address
-  -n, --notify-on-success         Also email on success (not just failures)
-  -s, --remote-name <name|path>   rclone remote (e.g. gdrive or gdrive:/n8n-backups)
-  -h, --help                      Show help
+  --mode <single|queue>               Install mode (default: single)   [install only]
+  -v, --version <tag>                 n8n image tag (default: latest stable)
+  -m, --ssl-email <email>             Email for Let’s Encrypt (install/upgrade)
+  -d, --dir <path>                    Target directory (default: /home/n8n)
+  -l, --log-level <LEVEL>             DEBUG | INFO (default) | WARN | ERROR
+  -f, --force                         Force backup or downgrade/redeploy
+  -e, --email-to <email>              Send notifications to this address
+  -n, --notify-on-success             Also email on success (not just failures)
+  -s, --remote-name <name|path>       rclone remote (e.g. gdrive or gdrive:/n8n-backups)
+
+  # Monitoring-related (install-time):
+  --monitoring                        Enable Prometheus/Grafana profile
+  --expose-prometheus                 Expose Prometheus publicly (default private)
+  --subdomain-n8n <sub>               Override n8n subdomain (default: n8n)
+  --subdomain-grafana <sub>           Override Grafana subdomain (default: grafana)
+  --subdomain-prometheus <sub>        Override Prometheus subdomain (default: prometheus)
+  --basic-auth-user <user>            Traefik basic auth user for Grafana/Prometheus
+  --basic-auth-pass <pass>            Traefik basic auth pass for Grafana/Prometheus
 ```
 
 > **Two different emails:**  
@@ -172,6 +193,13 @@ sudo ./n8n_manager.sh --install n8n.example.com -m you@example.com -v 1.107.2
 sudo ./n8n_manager.sh --install n8n.example.com -m you@example.com --mode queue
 ```
 
+**Enable monitoring (Grafana + Prometheus):**
+```bash
+sudo ./n8n_manager.sh --install example.com -m you@example.com --mode queue --monitoring \
+  --subdomain-n8n n8n --subdomain-grafana grafana \
+  --basic-auth-user admin --basic-auth-pass 'StrongPass123'
+```
+
 **Custom target directory:**
 ```bash
 sudo ./n8n_manager.sh --install n8n.example.com -m you@example.com --mode queue -d /opt/n8n
@@ -192,13 +220,15 @@ Example logs for single mode:
 ═════════════════════════════════════════════════════════════
 N8N has been successfully installed!
 Installation Mode:       single
-Domain:                  https://n8n.example.com
-Installed Version:       1.110.1
-Install Timestamp:       2025-09-04_14-35-55
+Domain (n8n):            https://n8n.example.com
+Grafana:                 https://grafana.example.com
+Prometheus:              (internal only)
+Installed Version:       1.111.0
+Install Timestamp:       2025-09-09_23-41-53
 Installed By:            root
 Target Directory:        /home/n8n
-SSL Email:               thenguyen.ai.automation@gmail.com
-Execution log:           /home/n8n/logs/install_n8n_2025-09-04_14-35-55.log
+SSL Email:               you@example.com
+Execution log:           /home/n8n/logs/install_n8n_2025-09-09_23-41-53.log
 ═════════════════════════════════════════════════════════════
 ```
 
@@ -208,13 +238,15 @@ Example logs for queue mode:
 ═════════════════════════════════════════════════════════════
 N8N has been successfully installed!
 Installation Mode:       queue
-Domain:                  https://n8n.example.com
-Installed Version:       1.110.1
-Install Timestamp:       2025-09-04_15-23-17
+Domain (n8n):            https://n8n.example.com
+Grafana:                 https://grafana.example.com
+Prometheus:              (internal only)
+Installed Version:       1.111.0
+Install Timestamp:       2025-09-09_15-22-05
 Installed By:            root
 Target Directory:        /home/n8n
-SSL Email:               thenguyen.au.automation@gmail.com
-Execution log:           /home/n8n/logs/install_n8n_2025-09-04_15-23-17.log
+SSL Email:               you@example.com
+Execution log:           /home/n8n/logs/install_n8n_2025-09-09_15-22-05.log
 ═════════════════════════════════════════════════════════════
 ```
 ---
@@ -228,21 +260,21 @@ sudo ./n8n_manager.sh -a
 
 **Upgrade to latest stable:**
 ```bash
-sudo ./n8n_manager.sh --upgrade n8n.example.com
+sudo ./n8n_manager.sh --upgrade
 ```
 
 **Upgrade to a specific version:**
 ```bash
-sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.107.3
+sudo ./n8n_manager.sh --upgrade -v 1.110.1
 ```
 
 **Downgrade or force redeploy of the same version:**
 ```bash
-sudo ./n8n_manager.sh --upgrade n8n.example.com -v 1.107.2 -f
+sudo ./n8n_manager.sh --upgrade -v 1.110.1 -f
 ```
 
 **Notes:**
-
+- No domain argument for upgrade; it reads existing config from `.env`.
 - Upgrades **auto-detect** whether your stack is single or queue mode (no flag needed).  
 - If you **omit `-v`** (or pass `latest`), the script resolves the latest stable tag and updates `.env` to that version.
 - If you **pass `-v <version>`**, the script validates the tag, pins it in `.env`, and deploys that exact version.
@@ -268,10 +300,10 @@ Execution log:           /home/n8n/logs/upgrade_n8n_2025-09-04_15-26-26.log
 
 Backups include:
 
-- Backs up Docker **volumes**: `n8n-data`, `postgres-data`, `letsencrypt`
+- Backs up Docker **volumes**: `n8n-data`, `postgres-data`, `letsencrypt` (+ monitoring volumes if enabled)
 - Creates a **PostgreSQL dump** (from the `postgres` container, DB `n8n`)
-- Copies of `.env` and `docker-compose.yml`  
-- **Skips** backup automatically if nothing has changed (unless you force it)
+- Copies of `.env` and `docker-compose.yml`
+- Change detection to skip redundant backups (use -f to force)
 - Keeps a rolling **30‑day summary** in `backups/backup_summary.md`
 - Optionally **uploads** backups to **Google Drive** via `rclone`
 - Sends **email alerts** through Gmail SMTP (**msmtp**) — with the log file attached on failures (and optionally on success)
@@ -316,15 +348,15 @@ Example logs for backup:
 ```
 ═════════════════════════════════════════════════════════════
 Backup completed!
-Detected Mode:           single
-Domain:                  https://n8n.example.com
+Detected Mode:           queue
+Domain (n8n):            https://n8n.example.com
 Backup Action:           Backup (forced)
 Backup Status:           SUCCESS
-Backup Timestamp:        2025-09-04_15-20-02
-Backup file:             /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_15-20-02.tar.gz
-N8N Version:             1.110.1
+Backup Timestamp:        2025-09-09_15-31-56
+Backup file:             /home/n8n/backups/n8n_backup_1.111.0_2025-09-09_15-31-56.tar.gz
+N8N Version:             1.111.0
 N8N Directory:           /home/n8n
-Log File:                /home/n8n/logs/backup_n8n_2025-09-04_15-20-02.log
+Log File:                /home/n8n/logs/backup_n8n_2025-09-09_15-31-56.log
 Daily tracking:          /home/n8n/backups/backup_summary.md
 Remote upload:           SKIPPED
 Email notification:      SKIPPED (not requested)
@@ -359,16 +391,16 @@ Example logs for restore:
 ```
 ═════════════════════════════════════════════════════════════
 Restore completed successfully.
-Detected Mode:           single
-Domain:                  https://n8n.example.com
-Restore from file:       /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_14-50-40.tar.gz
-Local archive used:      /home/n8n/backups/n8n_backup_1.110.1_2025-09-04_14-50-40.tar.gz
-Restore Timestamp:       2025-09-04_15-20-51
-N8N Version:             1.110.1
+Detected Mode:           queue
+Domain (n8n):            https://n8n.example.com
+Restore from file:       /home/n8n/backups/n8n_backup_1.111.0_2025-09-09_15-31-56.tar.gz
+Local archive used:      /home/n8n/backups/n8n_backup_1.111.0_2025-09-09_15-31-56.tar.gz
+Restore Timestamp:       2025-09-09_15-32-47
+N8N Version:             1.111.0
 N8N Directory:           /home/n8n
-Log File:                /home/n8n/logs/restore_n8n_2025-09-04_15-20-51.log
-Volumes restored:        letsencrypt, n8n-data
-PostgreSQL:              Restored from SQL dump
+Log File:                /home/n8n/logs/restore_n8n_2025-09-09_15-32-47.log
+Volumes restored:        grafana-data, letsencrypt, n8n-data, prometheus-data, redis-data
+PostgreSQL:              Restored from SQL file (.sql)
 ═════════════════════════════════════════════════════════════
 ```
 ---
@@ -376,23 +408,110 @@ PostgreSQL:              Restored from SQL dump
 ### Cleanup
 
 ```bash
-sudo ./n8n_manager.sh -c
+# Safe: keep TLS certs, keep base images, keep target dir (default /home/n8n)
+sudo ./n8n_manager.sh --cleanup safe
+
+# All: remove EVERYTHING (including letsencrypt, images, and wipe target dir)
+sudo ./n8n_manager.sh --cleanup all
 ```
 
 Interactive plan to:
 
-- `docker compose down --remove-orphans -v`  
-- Remove named volumes (keeps `letsencrypt` by default; set `KEEP_CERTS=false` to delete)  
-- Remove the stack network  
-- Prune dangling images (optionally remove base images if `REMOVE_IMAGES=true`)
+- `docker compose down --remove-orphans` (and -v in all to drop anonymous volumes)  
+- safe: removes named project volumes except letsencrypt; removes project network; prunes dangling images
+- all: removes all named volumes (including letsencrypt), removes network(s), prunes dangling images, removes base images (n8n & postgres families), and wipes the target directory
+
+> ⚠️ Rate limits: deleting `letsencrypt` may hit Let’s Encrypt issuance limits when you re-install soon after..
 
 ---
 
-## Queue Mode knowledge
+## Monitoring (Prometheus & Grafana)
 
-👉 For details about queue mode, see the full guide: [**n8n-queue-mode**](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)
+Turnkey observability for your n8n stack. When enabled, the manager deploys:
 
-⚠️ Set N8N_WORKER_SCALE in .env to change worker replicas (default 1).
+- **Prometheus** (scrapes metrics from n8n & exporters)
+- **Grafana** (pre-provisioned datasource, dashboard, alert rules)
+- **Exporters**: cAdvisor, Node Exporter, Redis Exporter, Postgres Exporter
+- **Traefik** routes with **Basic Auth** in front of Grafana (and optionally Prometheus)
+
+### Enable at install
+
+```bash
+sudo ./n8n_manager.sh --install example.com -m you@example.com --monitoring
+```
+
+Optional flags:
+
+- `--expose-prometheus` – also make Prometheus reachable at `https://prometheus.<domain>`  
+  (default: **internal only**, not exposed)
+- `--subdomain-grafana <sub>` – default `grafana` → `https://grafana.<domain>`
+- `--subdomain-prometheus <sub>` – default `prometheus` → `https://prometheus.<domain>`
+- `--basic-auth-user <user> --basic-auth-pass <pass>` – set/rotate proxy auth for monitoring UIs
+
+> The manager writes an `htpasswd` file at `/home/n8n/secrets/htpasswd` and points Traefik to it.
+
+### Enable/disable after install
+
+Monitoring is controlled by a Compose **profile**:
+
+- **Enable:** set `COMPOSE_PROFILES=monitoring` in `/home/n8n/.env` and redeploy:
+  ```bash
+  docker compose -f /home/n8n/docker-compose.yml --profile monitoring up -d
+  ```
+- **Disable:** set `COMPOSE_PROFILES=` (empty) and redeploy:
+  ```bash
+  docker compose -f /home/n8n/docker-compose.yml up -d
+  ```
+
+To (un)expose Prometheus later, set `EXPOSE_PROMETHEUS=true|false` in `.env` and redeploy.
+
+### URLs
+
+- **Grafana**: `https://grafana.<domain>` → **protected by Traefik Basic Auth**  
+- **Prometheus** (optional): `https://prometheus.<domain>` → **protected by Traefik Basic Auth** if exposed
+
+> Grafana’s own login depends on your Compose config. If you didn’t set `GF_*` envs, configure credentials in Grafana or set them via Compose and redeploy. Traefik Basic Auth always gates access at the edge.
+
+### What’s provisioned
+
+- **Grafana**
+  - Datasource bound to Prometheus
+  - Dashboard: `monitoring/grafana/provisioning/dashboards/n8n.json`
+  - Alert rules:  
+    - `monitoring/grafana/provisioning/alerts/n8n-alert-rules.yml`  
+    - `monitoring/grafana/provisioning/alerts/system-alert-rules.yml`  
+  > Configure **Contact points** and **Notification policies** in Grafana UI to actually send alerts.
+- **Prometheus**
+  - Config: `monitoring/prometheus.yml` (scrapes n8n and exporters)
+  - Adjust scrape intervals/targets by editing this file, then `docker compose up -d` to reload.
+
+### Environment variables (monitoring)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `COMPOSE_PROFILES` | Set to `monitoring` to enable the monitoring stack | *(empty)* |
+| `SUBDOMAIN_GRAFANA` | Grafana subdomain | `grafana` |
+| `SUBDOMAIN_PROMETHEUS` | Prometheus subdomain | `prometheus` |
+| `GRAFANA_FQDN` | Derived FQDN (`sub.domain`) | auto |
+| `PROMETHEUS_FQDN` | Derived FQDN | auto |
+| `TRAEFIK_USERSFILE` | htpasswd file path in Traefik container | `/etc/traefik/htpasswd` |
+| `MONITORING_BASIC_AUTH_USER` | Traefik Basic Auth user | `admin` |
+| `MONITORING_BASIC_AUTH_PASS` | Traefik Basic Auth password | generated/your value |
+| `EXPOSE_PROMETHEUS` | Whether Prometheus is public | `false` |
+
+### Backups & monitoring data
+
+When monitoring is enabled, `grafana-data` and `prometheus-data` volumes are **included** in backups and restored automatically.
+
+👉 For deeper context on n8n monitoring, see the guide: **[n8n-observability](https://github.com/thenguyenvn90/n8n-observability)**
+---
+
+## Queue Mode basics
+
+👉 For deeper context on queue mode, see the guide: **[n8n-queue-mode](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)**
+
+⚠️ Set `N8N_WORKER_SCALE` in `.env` to change worker replicas (default 1).
+
 ---
 
 ## Scheduling Daily Backups
@@ -565,14 +684,21 @@ The backup’s `.env.bak` must contain `N8N_ENCRYPTION_KEY`. If it’s missing o
 - Ensure workers are running: `docker compose ps` and `docker compose logs -f n8n-worker-1`  
 - If Redis auth is enabled in compose, ensure `.env` contains the same password.
 
+**Grafana asks for credentials.**  
+That’s Traefik Basic Auth. Change `MONITORING_BASIC_AUTH_USER/PASS` in `.env` or rotate them via `--basic-auth-user/--basic-auth-pass` and redeploy.
+
+**Can’t open Prometheus UI.**  
+It’s internal by default. Set `EXPOSE_PROMETHEUS=true` (or pass `--expose-prometheus` on install/upgrade) and redeploy.
+
 ---
 
 ## Security Notes
 
-- **Keep `.env` safe** — it contains **`N8N_ENCRYPTION_KEY`** and other secrets.
-- Treat backup archives as **sensitive**. They include your DB dump and configs.
+- **Protect `.env`** — it contains **`N8N_ENCRYPTION_KEY`** and other secrets.
+- Treat backup archives as **sensitive** (DB dumps, configs).
 - Use strong passwords and rotate tokens regularly.
 - Restrict SSH access and keep your system updated.
+- Leave `EXPOSE_PROMETHEUS=false` unless you need its UI; it’s always behind Basic Auth if exposed.
 
 ---
 

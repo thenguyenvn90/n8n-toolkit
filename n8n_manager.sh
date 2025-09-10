@@ -167,7 +167,7 @@ Actions (choose exactly one):
   -r, --restore <FILE_OR_REMOTE>
         Restore from local file or rclone remote (e.g. gdrive:folder/file.tar.gz)
 
-  -c, --cleanup [safe|all]  Cleanup mode (default: safe)
+  -c, --cleanup [safe|all]  Cleanup mode
                             safe → stop/compose down, remove discovered volumes (keep certs), rm compose networks
                             all  → plus remove letsencrypt, purge all project-labeled volumes/networks, remove base images,
                                    and wipe the target dir after confirmation
@@ -1192,132 +1192,242 @@ restore_stack() {
 
 ################################################################################
 # cleanup_stack()
-# Description:
-#   Interactively tear down the stack and remove named resources.
 #
-# Behaviors:
-#   - Prints a plan and asks for confirmation.
-#   - Runs `compose down --remove-orphans`.
-#   - Removes named volumes in VOLUMES; respects KEEP_CERTS=true for letsencrypt.
-#   - Prunes dangling images; optionally removes base images if REMOVE_IMAGES=true.
-#   - Logs completion and whether certs were preserved.
+# Purpose
+#   Tear down the n8n Docker stack and remove project resources with two
+#   levels of aggressiveness, while clearly previewing what will be deleted.
 #
-# Returns:
-#   0 on completion; 0 if user cancels; non-zero only on unexpected errors.
+# Modes
+#   safe (default via CLEANUP_MODE=safe)
+#     - Runs `docker compose down --remove-orphans`
+#     - Deletes named project volumes EXCEPT `letsencrypt`
+#       (preserves TLS certs to avoid Let's Encrypt rate limits)
+#     - Removes discovered project Docker networks
+#     - Prunes dangling images (`docker image prune -f`)
+#     - Keeps base images (n8nio/n8n, docker.n8n.io/n8nio/n8n, postgres)
+#     - Does NOT wipe files in $N8N_DIR
+#
+#   all  (CLEANUP_MODE=all)
+#     - Runs `docker compose down --remove-orphans -v` (also drops anonymous vols)
+#     - Deletes ALL named project volumes, including `letsencrypt`
+#     - Removes discovered project Docker networks
+#     - Prunes dangling images AND removes base images (n8n + postgres)
+#     - Wipes the project directory $N8N_DIR (via safe_wipe_target_dir)
+#     - Prompts for a yes/no confirmation before executing
+#
+# What it does (high level)
+#   1) Discovers compose-defined volumes and networks
+#   2) Builds the exact deletion sets (volumes, networks, images, dir entries)
+#   3) Prints a PREVIEW block showing every item that will be removed
+#   4) If mode = all, asks for interactive confirmation (yes/no)
+#   5) Executes the plan:
+#        - docker compose down (with flags per mode)
+#        - docker volume rm <named volumes>
+#        - docker network rm <project networks>
+#        - docker image prune -f
+#        - (all) docker rmi -f <base images by ID>
+#        - (all) safe_wipe_target_dir
 ################################################################################
 cleanup_stack() {
     discover_from_compose
     discover_compose_networks || true
 
-    # Defaults (safe mode)
     local MODE="${CLEANUP_MODE:-safe}"
-    local KEEP_CERTS="${KEEP_CERTS:-true}"
-    local REMOVE_IMAGES="${REMOVE_IMAGES:-false}"
-    local DO_PURGE=false
-    local DO_WIPE_DIR=false
+    local NUKE_ALL=false
+    case "$MODE" in
+        safe) NUKE_ALL=false ;;
+        all)  NUKE_ALL=true  ;;
+        *)    log ERROR "cleanup mode must be 'safe' or 'all', got '$MODE'"; exit 2 ;;
+    esac
 
-    if [[ "$MODE" == "all" ]]; then
-        DO_PURGE=true
-        DO_WIPE_DIR=true
-        KEEP_CERTS="false"
-        REMOVE_IMAGES="true"
+    # Flags for compose down
+    local -a DOWN_FLAGS=(--remove-orphans)
+    $NUKE_ALL && DOWN_FLAGS+=(-v)   # in ALL, also remove anonymous volumes
+
+    # ---------- Determine resources to delete (preview) ----------
+    # Volumes (named)
+    local -a VOLS_TO_REMOVE=()      # logical names from compose
+    local -a VOLS_EXISTING=()       # "logical|real" only if they currently exist
+    if $NUKE_ALL; then
+        VOLS_TO_REMOVE=("${DISCOVERED_VOLUMES[@]}")
+    else
+        local v
+        for v in "${DISCOVERED_VOLUMES[@]}"; do
+            [[ "$v" == "letsencrypt" ]] && continue
+            VOLS_TO_REMOVE+=("$v")
+        done
+    fi
+    # Map to real docker volume names and keep only those that exist
+    if ((${#VOLS_TO_REMOVE[@]})); then
+        local vname real
+        for vname in "${VOLS_TO_REMOVE[@]}"; do
+            real="$(resolve_volume_name "$vname" || expected_volume_name "$vname")"
+            if docker volume inspect "$real" >/dev/null 2>&1; then
+                VOLS_EXISTING+=("$vname|$real")
+            fi
+        done
     fi
 
-    local show_v=""
-    [[ "${KEEP_CERTS}" == "false" ]] && show_v="-v"
-
-    log WARN "Cleanup mode: ${MODE^^}"
-    echo "Planned actions:"
-    echo "  - docker compose down --remove-orphans${show_v:+ ${show_v}}"
-    echo "  - Remove volumes: ${DISCOVERED_VOLUMES[*]}  (letsencrypt kept: ${KEEP_CERTS})"
+    # Networks
+    local -a NETS_TO_REMOVE=()
     if ((${#DISCOVERED_NETWORKS[@]})); then
-        echo "  - Remove docker networks: ${DISCOVERED_NETWORKS[*]}"
+        NETS_TO_REMOVE=("${DISCOVERED_NETWORKS[@]}")
     else
-        echo "  - Remove docker networks: <auto> (e.g. $(project_default_network_name) if present)"
+        local defnet
+        defnet="$(project_default_network_name)"
+        if [[ -n "$defnet" ]] && docker network inspect "$defnet" >/dev/null 2>&1; then
+            NETS_TO_REMOVE+=("$defnet")
+        fi
     fi
-    if $DO_PURGE; then
-        echo "  - PURGE: remove *all* project-labeled volumes and networks"
-        echo "  - PURGE: remove base images (n8nio/n8n, docker.n8n.io/n8nio/n8n, postgres)"
-        echo "  - PURGE: wipe target directory contents: $N8N_DIR"
+
+    # Images (ALL only): n8n & postgres families; gather printable list + IDs
+    local -a IMAGES_TO_REMOVE=()
+    local -a IMAGE_IDS=()
+    if $NUKE_ALL; then
+        # Lines: "<repo:tag> <id>" — avoid grep failing with set -e by using awk
+        while read -r repotag imgid; do
+            [[ -z "$repotag" || -z "$imgid" ]] && continue
+            IMAGES_TO_REMOVE+=("${repotag} (${imgid})")
+            IMAGE_IDS+=("$imgid")
+        done < <(
+            docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+            | awk '/^(n8nio\/n8n|docker\.n8n\.io\/n8nio\/n8n|postgres):/ { print $0 }'
+        )
+    fi
+
+    # Directory contents to wipe (only ALL)
+    local -a DIR_ENTRIES=()
+    if $NUKE_ALL; then
+        shopt -s dotglob nullglob
+        local p
+        for p in "$N8N_DIR"/*; do
+            DIR_ENTRIES+=("$(basename "$p")")
+        done
+        shopt -u dotglob nullglob
+    fi
+
+    # ---------- Preview ----------
+    echo "════════════════ CLEANUP PREVIEW (mode: ${MODE^^}) ════════════════"
+    {
+        local IFS=' '
+        printf 'Will run: docker compose down %s\n\n' "${DOWN_FLAGS[*]}"
+    }
+    echo "Named volumes to be DELETED:"
+    if ((${#VOLS_EXISTING[@]})); then
+        local pair lv rv
+        for pair in "${VOLS_EXISTING[@]}"; do
+            IFS='|' read -r lv rv <<< "$pair"
+            echo "  - ${lv}  ->  ${rv}"
+        done
     else
-        echo "  - Prune dangling images (docker image prune -f)"
-        echo "  - Remove base images (n8nio/n8n, postgres) : ${REMOVE_IMAGES}"
+        echo "  - <none>"
     fi
     echo
 
-    local ans
-    if $DO_PURGE && $DO_WIPE_DIR; then
+    echo "Docker networks be DELETED:"
+    if ((${#NETS_TO_REMOVE[@]})); then
+        local n
+        for n in "${NETS_TO_REMOVE[@]}"; do
+            echo "  - ${n}"
+        done
+    else
+        echo "  - <none detected>"
+    fi
+    echo
+
+    echo "Dangling images to be PRUNED:"
+    echo "  - (dynamic: docker image prune -f)"
+    if $NUKE_ALL; then
         echo
-        echo "DANGER: This will delete ALL files under: $N8N_DIR"
-        read -e -p "Type 'DELETE' to confirm: " ans
-        [[ "$ans" == "DELETE" ]] || { log INFO "Failed to confirm the deletion. Skipping dir wipe."; DO_WIPE_DIR=false; }
+        echo "Base images to DELETE:"
+        if ((${#IMAGES_TO_REMOVE[@]})); then
+            local i
+            for i in "${IMAGES_TO_REMOVE[@]}"; do
+                echo "  - ${i}"
+            done
+        else
+            echo "  - <none matched>"
+        fi
+        echo
+        echo "Target directory to be WIPED: $N8N_DIR"
+        if ((${#DIR_ENTRIES[@]})); then
+            echo "  Contents to be removed:"
+            local d
+            for d in "${DIR_ENTRIES[@]}"; do
+                echo "    - $d"
+            done
+        else
+            echo "  (directory is empty)"
+        fi
+        echo
+        echo "NOTE: letsencrypt volume WILL be removed (Let's Encrypt rate limits may apply)."
+    else
+        echo
+        echo "NOTES (SAFE):"
+        echo "  - Preserving 'letsencrypt' volume (keeps TLS certs)."
+        echo "  - No directory wipe."
+        echo "  - Base images are kept."
+    fi
+    echo "══════════════════════════════════════════════════════════════"
+
+    # ---------- Confirmation (ALL only) ----------
+    if $NUKE_ALL; then
+        local ans
+        read -r -p "Proceed with FULL cleanup (all)? (yes/no) [no]: " ans
+        case "${ans,,}" in
+            y|yes) ;;
+            *) log INFO "Cleanup (all) cancelled by user."; return 0 ;;
+        esac
     fi
 
-    log INFO "Shutting down stack (KEEP_CERTS=${KEEP_CERTS})..."
-    local -a down_flags=(--remove-orphans)
-    [[ "$KEEP_CERTS" == "false" ]] && down_flags+=(-v)
-
+    # ---------- Execute ----------
+    log INFO "Shutting down stack…"
     if [[ -f "$N8N_DIR/docker-compose.yml" ]]; then
-        compose down "${down_flags[@]}" || true
+        compose down "${DOWN_FLAGS[@]}" || true
     else
         log WARN "docker-compose.yml not found at \$N8N_DIR; attempting plain 'docker compose down' in $PWD."
-        docker compose down "${down_flags[@]}" || true
+        docker compose down "${DOWN_FLAGS[@]}" || true
     fi
 
-    log INFO "Removing related volumes..."
-    local vol real
-    for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        if [[ "$KEEP_CERTS" == "true" && "$vol" == "letsencrypt" ]]; then
-            log INFO "Skipping volume '$vol' (KEEP_CERTS=true)"
-            continue
-        fi
-        real="$(resolve_volume_name "$vol" || expected_volume_name "$vol")"
-        if docker volume inspect "$real" >/dev/null 2>&1; then
-            if docker volume rm "$real" >/dev/null 2>&1; then
-                log INFO "Removed volume: $vol"
+    if ((${#VOLS_EXISTING[@]})); then
+        log INFO "Removing named volumes…"
+        local pair lv rv
+        for pair in "${VOLS_EXISTING[@]}"; do
+            IFS='|' read -r lv rv <<< "$pair"
+            if docker volume inspect "$rv" >/dev/null 2>&1; then
+                if docker volume rm "$rv" >/dev/null 2>&1; then
+                    log INFO "Removed volume: $lv ($rv)"
+                else
+                    log WARN "Could not remove volume '$lv' ($rv) — maybe still in use?"
+                fi
             else
-                log WARN "Could not remove volume '$vol' (in use?)."
+                log INFO "Already gone: $lv ($rv) (removed by compose)"
             fi
-        else
-            log INFO "Volume '$vol' not found; skipping."
-        fi
-    done
+        done
+    fi
 
-    log INFO "Removing Compose networks (if present)…"
+    log INFO "Removing docker networks…"
     remove_compose_networks
 
-    if $DO_PURGE; then
+    if $NUKE_ALL; then
         purge_project_volumes_by_label
         purge_project_networks_by_label
     fi
 
-    if $DO_PURGE; then
-        log INFO "Pruning dangling images…"
-        docker image prune -f >/dev/null 2>&1 || true
-        log WARN "Removing base images: n8nio/n8n and postgres (PURGE)"
-        docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-          | grep -E '^(n8nio/n8n|docker\.n8n\.io/n8nio/n8n|postgres):' \
-          | awk '{print $2}' \
-          | xargs -r docker rmi -f || true
-    else
-        log INFO "Pruning dangling images…"
-        docker image prune -f >/dev/null 2>&1 || true
-        if [[ "$REMOVE_IMAGES" == "true" ]]; then
-            log WARN "Removing base images: n8nio/n8n and postgres (explicit request)"
-            docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-              | grep -E '^(n8nio/n8n|docker\.n8n\.io/n8nio/n8n|postgres):' \
-              | awk '{print $2}' \
-              | xargs -r docker rmi -f || true
-        fi
+    log INFO "Pruning dangling images…"
+    docker image prune -f >/dev/null 2>&1 || true
+    if $NUKE_ALL && ((${#IMAGE_IDS[@]})); then
+        log WARN "Removing base images…"
+        docker rmi -f "${IMAGE_IDS[@]}" >/dev/null 2>&1 || true
     fi
 
-    if $DO_PURGE && $DO_WIPE_DIR; then
+    if $NUKE_ALL; then
         safe_wipe_target_dir
     fi
 
     log INFO "Cleanup completed (mode=${MODE^^})."
-    if [[ "$MODE" == "safe" && "$KEEP_CERTS" == "true" ]]; then
-        log INFO "Note: kept 'letsencrypt' volume (certs preserved). Use '--cleanup all' to remove it."
+    if [[ "$MODE" == "safe" ]]; then
+        log INFO "Preserved 'letsencrypt' volume. Use '--cleanup all' to remove everything."
     fi
 }
 
@@ -1325,17 +1435,12 @@ cleanup_stack() {
 # parse_args()
 # Description:
 #   Parse CLI arguments and set global flags/vars.
-#
-# Behaviors:
-#   - Enforces single action selection.
-#   - Uses distinct flags for SSL email vs. notification email.
-#
-# Returns:
-#   0 on success; exits 1 on invalid usage.
+#   - Enforces exactly one primary action.
 ################################################################################
 parse_args() {
-    SHORT="i:u:v:m:c::bad:l:r:e:ns:fh"
-    LONG="install:,upgrade:,version:,ssl-email:,cleanup::,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
+    # NOTE: keep short/long specs in sync with usage()
+    SHORT="i:uv:m:c:bad:l:r:e:ns:fh"
+    LONG="install:,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -1345,71 +1450,109 @@ parse_args() {
             -i|--install)
                 DO_INSTALL=true
                 DOMAIN="$(parse_domain_arg "$2")"
-                shift 2 ;;
+                shift 2
+                ;;
             -u|--upgrade)
-                DO_UPGRADE=true; shift ;;
+                DO_UPGRADE=true
+                shift
+                ;;
             -v|--version)
-                N8N_VERSION="$2"; shift 2 ;;
+                N8N_VERSION="$2"
+                shift 2
+                ;;
             -m|--ssl-email)
-                SSL_EMAIL="$2"; shift 2 ;;
+                SSL_EMAIL="$2"
+                shift 2
+                ;;
             -c|--cleanup)
                 DO_CLEANUP=true
-                # Accept "--cleanup all" or "--cleanup=safe", default to "safe"
-                if [[ -n "${2:-}" && "$2" != "--" && "$2" != "-"* ]]; then
-                    CLEANUP_MODE="${2,,}"
-                    shift 2
-                else
-                    CLEANUP_MODE="safe"
-                    shift
-                fi
-                case "$CLEANUP_MODE" in
-                    safe|all) ;; 
-                    *) log ERROR "Invalid cleanup mode '$CLEANUP_MODE' (use: safe|all)"; exit 2 ;;
-                esac
+                CLEANUP_MODE="$2"
+                shift 2
                 ;;
             -b|--backup)
-                DO_BACKUP=true; shift ;;
+                DO_BACKUP=true
+                shift
+                ;;
             -a|--available)
-                DO_AVAILABLE=true; shift ;;
+                DO_AVAILABLE=true
+                shift
+                ;;
             -d|--dir)
-                N8N_DIR="$2"; shift 2 ;;
+                N8N_DIR="$2"
+                shift 2
+                ;;
             -l|--log-level)
-                LOG_LEVEL="${2^^}"; shift 2 ;;
+                LOG_LEVEL="${2^^}"
+                shift 2
+                ;;
             -r|--restore)
-                DO_RESTORE=true; TARGET_RESTORE_FILE="$2"; shift 2 ;;
+                DO_RESTORE=true
+                TARGET_RESTORE_FILE="$2"
+                shift 2
+                ;;
             -e|--email-to)
-                EMAIL_TO="$2"; EMAIL_EXPLICIT=true; shift 2 ;;
+                EMAIL_TO="$2"
+                EMAIL_EXPLICIT=true
+                shift 2
+                ;;
             -n|--notify-on-success)
-                NOTIFY_ON_SUCCESS=true; shift ;;
+                NOTIFY_ON_SUCCESS=true
+                shift
+                ;;
             -s|--remote-name)
-                RCLONE_REMOTE="$2"; shift 2 ;;
+                RCLONE_REMOTE="$2"
+                shift 2
+                ;;
             --mode)
-                INSTALL_MODE="$2"; shift 2 ;;
+                INSTALL_MODE="$2"
+                shift 2
+                ;;
             --monitoring)
-                MONITORING=true; shift ;;
+                MONITORING=true
+                shift
+                ;;
             --expose-prometheus)
-                EXPOSE_PROMETHEUS=true; shift ;;
+                EXPOSE_PROMETHEUS=true
+                shift
+                ;;
             --subdomain-n8n)
-                SUBDOMAIN_N8N="$2"; shift 2 ;;
+                SUBDOMAIN_N8N="$2"
+                shift 2
+                ;;
             --subdomain-grafana)
-                SUBDOMAIN_GRAFANA="$2"; shift 2 ;;
+                SUBDOMAIN_GRAFANA="$2"
+                shift 2
+                ;;
             --subdomain-prometheus)
-                SUBDOMAIN_PROMETHEUS="$2"; shift 2 ;;
+                SUBDOMAIN_PROMETHEUS="$2"
+                shift 2
+                ;;
             --basic-auth-user)
-                BASIC_AUTH_USER="$2"; shift 2 ;;
+                BASIC_AUTH_USER="$2"
+                shift 2
+                ;;
             --basic-auth-pass)
-                BASIC_AUTH_PASS="$2"; shift 2 ;;
+                BASIC_AUTH_PASS="$2"
+                shift 2
+                ;;
             -f|--force)
-                FORCE_FLAG=true; shift ;;
+                FORCE_FLAG=true
+                shift
+                ;;
             -h|--help)
-                usage ;;
+                usage
+                ;;
             --)
-                shift; break ;;
+                shift
+                break
+                ;;
             *)
-                usage ;;
+                usage
+                ;;
         esac
     done
 
+    # Enforce exactly one primary action
     local count=0
     $DO_INSTALL   && ((count+=1))
     $DO_UPGRADE   && ((count+=1))
@@ -1417,12 +1560,23 @@ parse_args() {
     $DO_RESTORE   && ((count+=1))
     $DO_CLEANUP   && ((count+=1))
     $DO_AVAILABLE && ((count+=1))
-    (( count == 1 )) || { log ERROR "Choose exactly one action."; usage; }
+    if (( count != 1 )); then
+        log ERROR "Choose exactly one action."
+        usage
+    fi
 
+    # Validate install mode if used
     if $DO_INSTALL; then
-        case "$INSTALL_MODE" in
+        case "${INSTALL_MODE}" in
             single|queue) ;;
-            *) log ERROR "Invalid --mode '$INSTALL_MODE' (use single|queue)"; exit 2 ;;
+            *) log ERROR "Invalid --mode '${INSTALL_MODE}' (use single|queue)"; exit 2 ;;
+        esac
+    fi
+
+    if $DO_CLEANUP; then
+        case "${CLEANUP_MODE}" in
+            safe|all) ;;
+            *) log ERROR "cleanup expects with option 'safe' or 'all'"; exit 2 ;;
         esac
     fi
 }

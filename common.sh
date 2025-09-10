@@ -399,21 +399,39 @@ parse_domain_arg() {
 #     Insert or update KEY=VALUE in a .env file idempotently.
 #
 # Behaviors:
-#     - Creates the file if missing.
-#     - Escapes backslashes and '&' for sed safety.
+#   upsert_env_var KEY VALUE FILE
+#   Idempotently set KEY=VALUE in FILE.
+#       - If KEY exists (line begins with "^KEY="), replace the whole line.
+#       - If KEY is missing, append "KEY=VALUE" and ensure there's a newline before it.
+#       - Handles special chars in VALUE (/, &, backslashes) for sed.
 #
 # Returns:
 #     0 on success.
 ################################################################################
 upsert_env_var() {
-    local key="$1" val="$2" file="$3"
-    [[ -f "$file" ]] || : > "$file"
+    local key="$1"
+    local value="$2"
+    local file="$3"
 
-    local esc="${val//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//|/\\|}"
+    [[ -n "$key" && -n "$file" ]] || { echo "[ERROR] upsert_env_var: missing key or file" >&2; return 1; }
+    [[ -f "$file" ]] || touch "$file"
+
+    # Escape VALUE for sed replacement (slashes, ampersands, and backslashes)
+    local esc
+    esc="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g' -e 's/\\/\\\\/g')"
+
     if grep -qE "^${key}=" "$file"; then
-        sed -i "s|^${key}=.*$|${key}=${esc}|" "$file"
+        # Replace entire line
+        sed -i -E "s|^${key}=.*$|${key}=${esc}|g" "$file"
     else
-        printf '%s=%s\n' "$key" "$val" >> "$file"
+        # Ensure file ends with a newline before appending
+        if [[ -s "$file" ]]; then
+            # If last char is not a newline, add one
+            local last_char
+            last_char="$(tail -c1 -- "$file" 2>/dev/null || true)"
+            [[ "$last_char" == $'\n' ]] || printf '\n' >> "$file"
+        fi
+        printf '%s=%s\n\n' "$key" "$value" >> "$file"
     fi
 }
 
