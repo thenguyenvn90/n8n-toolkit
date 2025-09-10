@@ -131,8 +131,6 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
     restart: unless-stopped
     env_file: [.env]
-    environment:
-      - N8N_METRICS=true
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
     depends_on:
@@ -148,8 +146,6 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: [.env]
-    environment:
-      - N8N_METRICS=true
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
