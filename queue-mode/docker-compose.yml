@@ -134,6 +134,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - N8N_METRICS=true
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
     depends_on:
