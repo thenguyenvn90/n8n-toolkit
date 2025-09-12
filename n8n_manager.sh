@@ -167,10 +167,7 @@ Actions (choose exactly one):
   -r, --restore <FILE_OR_REMOTE>
         Restore from local file or rclone remote (e.g. gdrive:folder/file.tar.gz)
 
-  -c, --cleanup [safe|all]  Cleanup mode
-                            safe → stop/compose down, remove discovered volumes (keep certs), rm compose networks
-                            all  → plus remove letsencrypt, purge all project-labeled volumes/networks, remove base images,
-                                   and wipe the target dir after confirmation
+  -c, --cleanup [safe|all]  Stop stack & remove resources (preview; confirm in 'all')
 
 Options:
   --mode <single|queue>     (install only; default: single)
@@ -184,6 +181,15 @@ Options:
   -s, --remote-name <name>  rclone remote root (e.g. gdrive-user or gdrive-user:/n8n-backups)
   -h, --help                Show this help
 
+# Monitoring-related (install-time):
+  --monitoring                        Enable Prometheus/Grafana profile
+  --expose-prometheus                 Expose Prometheus publicly (default: private)
+  --subdomain-n8n <sub>               Override n8n subdomain (default: n8n)
+  --subdomain-grafana <sub>           Override Grafana subdomain (default: grafana)
+  --subdomain-prometheus <sub>        Override Prometheus subdomain (default: prometheus)
+  --basic-auth-user <user>            Traefik basic auth user for Grafana/Prometheus
+  --basic-auth-pass <pass>            Traefik basic auth pass for Grafana/Prometheus
+
 Examples:
   $0 -a
       # List available versions
@@ -196,6 +202,9 @@ Examples:
 
   $0 --install example.com -m you@example.com -d /path/to/n8n --mode queue
       # Install the latest n8n version (queue mode) to a specific target directory
+
+  $0 --install example.com -m you@example.com --mode queue --monitoring --basic-auth-user admin --basic-auth-pass 'StrongPass123'
+      # Install the latest n8n version (queue mode) with monitoring (Grafana + Prometheus)
 
   $0 --upgrade
       # Upgrade to the latest n8n version (domain/FQDNs read from .env)
@@ -285,38 +294,26 @@ copy_templates_for_mode() {
     done
 
     # Update .env
-    log INFO "Updating .env with DOMAIN, SSL_EMAIL and N8N_IMAGE_TAG…"
+    log INFO "Updating DOMAIN=$DOMAIN in $ENV_FILE"
     upsert_env_var "DOMAIN" "$DOMAIN" "$ENV_FILE"
+
+    log INFO "Updating SSL_EMAIL=$SSL_EMAIL in $ENV_FILE"
     [[ -n "${SSL_EMAIL:-}" ]] && upsert_env_var "SSL_EMAIL" "$SSL_EMAIL" "$ENV_FILE"
 
     # Resolve target version: explicit -v wins; else latest stable
     local target_version
     target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1
-    log INFO "Updating .env with N8N_IMAGE_TAG=$target_version"
+    log INFO "Updating N8N_IMAGE_TAG=$target_version in $ENV_FILE"
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
 
-    # Rotate STRONG_PASSWORD if missing/default
-    local password_line
-    password_line=$(awk -F= '/^STRONG_PASSWORD=/{print $2; found=1} END{if(!found) print ""}' "$ENV_FILE")
-    if [[ "$password_line" == "CHANGE_ME_BASE64_16_BYTES" || -z "$password_line" ]]; then
-        local new_password
-        new_password="$(openssl rand -base64 16)"
-        log INFO "Setting STRONG_PASSWORD in .env"
-        upsert_env_var "STRONG_PASSWORD" "${new_password}" "$ENV_FILE"
-    else
-        log INFO "Existing STRONG_PASSWORD found. Not modifying it."
-    fi
+    # Rotate SECRETS in env if missing/default
+    rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_BASIC_AUTH_PASSWORD  16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
 
-    # Rotate N8N_ENCRYPTION_KEY if missing/default
-    local enc_key_line
-    enc_key_line=$(awk -F= '/^N8N_ENCRYPTION_KEY=/{print $2; found=1} END{if(!found) print ""}' "$ENV_FILE")
-    if [[ -z "$enc_key_line" || "$enc_key_line" == "CHANGE_ME_BASE64_32_BYTES" ]]; then
-        local new_key
-        new_key="$(openssl rand -base64 32)"
-        log INFO "Setting N8N_ENCRYPTION_KEY in .env"
-        upsert_env_var "N8N_ENCRYPTION_KEY" "${new_key}" "$ENV_FILE"
-    else
-        log INFO "Existing N8N_ENCRYPTION_KEY found. Not modifying it."
+    # Queue mode only
+    if [[ "${INSTALL_MODE:-single}" == "queue" ]] || [[ "${DISCOVERED_MODE:-}" == "queue" ]]; then
+        rotate_or_generate_secret "$ENV_FILE" REDIS_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
     fi
 
     # Subdomains & monitoring flags persisted in .env
@@ -609,6 +606,9 @@ do_local_backup() {
         return 1
     fi
     log INFO "Created checksum -> $BACKUP_DIR/$BACKUP_FILE.sha256"
+
+    chmod 600 "$BACKUP_DIR/"*.tar.gz 2>/dev/null || true
+    chmod 600 "$BACKUP_DIR/"*.sha256 2>/dev/null || true
 
     log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days..."
     rm -rf "$BACKUP_PATH"

@@ -509,6 +509,48 @@ ensure_encryption_key() {
 }
 
 ################################################################################
+# rotate_or_generate_secret()
+# Description:
+#   Ensures a secret variable in the .env file is properly set.
+#   If missing or still a placeholder, generates a secure value using openssl.
+#
+# Behaviors:
+#   - Reads the value of the specified variable from the provided .env file.
+#   - If the value is empty or matches the placeholder, generates a new secret.
+#   - Updates the .env file with the new value.
+#
+# Returns:
+#   None. Prints info message on rotation.
+################################################################################
+rotate_or_generate_secret() {
+    local envfile="$1"     # path to .env
+    local key="$2"         # VAR name
+    local bytes="$3"       # number of random bytes before base64
+    local placeholder="$4" # placeholder to detect
+
+    [[ -n "$envfile" && -n "$key" && -n "$bytes" ]] || { log ERROR "rotate_or_generate_secret: missing args"; return 1; }
+    [[ -f "$envfile" ]] || : > "$envfile"
+
+    # Read current value (prefer your read_env_var if present)
+    local current=""
+    if declare -F read_env_var >/dev/null 2>&1; then
+        current="$(read_env_var "$envfile" "$key" || true)"
+    else
+        # simple fallback (won’t handle quotes/comments as robustly as read_env_var)
+        current="$(awk -F= -v v="$key" '$1==v{print substr($0, index($0,$2)); exit}' "$envfile" | tr -d '\r')"
+    fi
+
+    if [[ -z "$current" || "$current" == "$placeholder" ]]; then
+        local new_secret
+        new_secret="$(openssl rand -base64 "$bytes" | tr -d '\n')"
+        upsert_env_var "$key" "$new_secret" "$envfile"
+        log INFO "Rotated ${key} in ${envfile}"
+    else
+        log INFO "Existing ${key} found. Not rotating."
+    fi
+}
+
+################################################################################
 # compose()
 # Description:
 #     Wrapper around `docker compose` that targets the project directory,
@@ -627,7 +669,6 @@ discover_compose_networks() {
     log DEBUG "Networks: ${DISCOVERED_NETWORKS[*]:-<none>} (external logicals: ${DISCOVERED_NETWORK_EXTERNAL[*]:-<none>})"
     return 0
 }
-
 
 ################################################################################
 # discover_from_compose()

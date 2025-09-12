@@ -51,6 +51,8 @@ services:
     image: postgres:14
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
@@ -68,6 +70,7 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
+      - TZ=${GENERIC_TIMEZONE}
       - N8N_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
@@ -129,6 +132,7 @@ services:
       - "traefik.docker.network=n8n-network"
       - "traefik.http.routers.prom.rule=Host(`${PROMETHEUS_FQDN}`)"
       - "traefik.http.routers.prom.entrypoints=websecure"
+      - "traefik.http.routers.prom.tls=true"
       - "traefik.http.routers.prom.tls.certresolver=le"
       - "traefik.http.services.prom.loadbalancer.server.port=9090"
       - "traefik.http.routers.prom.middlewares=prom-auth@docker"
@@ -139,6 +143,7 @@ services:
     image: grafana/grafana:latest
     restart: unless-stopped
     environment:
+      - TZ=${GENERIC_TIMEZONE}
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_BASIC_AUTH_PASS}
       - GF_SERVER_DOMAIN=${GRAFANA_FQDN}
@@ -226,4 +231,6 @@ volumes:
   letsencrypt:
     external: true
   prometheus-data:
+    external: true
   grafana-data:
+    external: true
