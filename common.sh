@@ -416,22 +416,29 @@ upsert_env_var() {
     [[ -n "$key" && -n "$file" ]] || { echo "[ERROR] upsert_env_var: missing key or file" >&2; return 1; }
     [[ -f "$file" ]] || touch "$file"
 
-    # Escape VALUE for sed replacement (slashes, ampersands, and backslashes)
-    local esc
-    esc="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g' -e 's/\\/\\\\/g')"
+    # .env values must be single-line
+    if [[ "$value" == *$'\n'* ]]; then
+        echo "[ERROR] upsert_env_var: value contains newline(s)" >&2
+        return 1
+    fi
 
-    if grep -qE "^${key}=" "$file"; then
-        # Replace entire line
-        sed -i -E "s|^${key}=.*$|${key}=${esc}|g" "$file"
+    # Escape ONLY & and backslashes for the sed replacement
+    local repl
+    repl="$(printf '%s' "$value" | sed -e 's/[&]/\\&/g' -e 's/\\/\\\\/g')"
+
+    # Escape regex specials in the key for the match
+    local keyre
+    keyre="$(printf '%s' "$key" | sed -e 's/[][\\.^$*+?|(){}]/\\&/g')"
+
+    if grep -q -E "^${keyre}=" "$file"; then
+        # Replace the whole line
+        sed -i -E "s|^${keyre}=.*$|${key}=${repl}|g" "$file"
     else
-        # Ensure file ends with a newline before appending
+        # Ensure file ends with a single newline before appending
         if [[ -s "$file" ]]; then
-            # If last char is not a newline, add one
-            local last_char
-            last_char="$(tail -c1 -- "$file" 2>/dev/null || true)"
-            [[ "$last_char" == $'\n' ]] || printf '\n' >> "$file"
+            tail -c1 -- "$file" 2>/dev/null | grep -q $'\n' || printf '\n' >> "$file"
         fi
-        printf '%s=%s\n\n' "$key" "$value" >> "$file"
+        printf '%s=%s\n' "$key" "$value" >> "$file"
     fi
 }
 
