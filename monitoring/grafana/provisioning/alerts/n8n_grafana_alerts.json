@@ -1,0 +1,640 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "n8n - Common",
+      "folder": "n8n Alerts",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "n8n-down",
+          "title": "n8n Down",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 120, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "min_over_time(up{job=\"n8n\"}[2m])",
+                "instant": false,
+                "interval": "",
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 120, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "lt", "params": [0.5] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "2m",
+          "noDataState": "Alerting",
+          "execErrState": "Alerting",
+          "labels": { "severity": "critical", "mode": "common" },
+          "annotations": {
+            "summary": "n8n target is down",
+            "description": "Prometheus 'up' for job=n8n is 0 for 2m on {{ $labels.instance }}",
+            "value": "{{ $values.A }}",
+            "duration": "{{ $duration }}"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-api-error-warn",
+          "title": "API error ratio high (warn)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "100 * ( sum by (instance) (rate(n8n_api_requests_failed_total{job=\"n8n\"}[5m])) / clamp_min(sum by (instance) (rate(n8n_api_requests_total{job=\"n8n\"}[5m])), 0.001) )",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [2] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "10m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "n8n API error ratio > 2% (5m)",
+            "description": "HTTP 5xx rate over total > 2% for 10m. Investigate logs, recent deploys, or traffic spikes.",
+            "value": "{{ $values.A | printf \"%.2f\" }}%"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-api-error-crit",
+          "title": "API error ratio very high (critical)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "100 * ( sum by (instance) (rate(n8n_api_requests_failed_total{job=\"n8n\"}[5m])) / clamp_min(sum by (instance) (rate(n8n_api_requests_total{job=\"n8n\"}[5m])), 0.001) )",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [5] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "critical", "mode": "common" },
+          "annotations": {
+            "summary": "n8n API error ratio > 5% (5m)",
+            "description": "Sustained HTTP 5xx > 5% for 5m on {{ $labels.instance }}.",
+            "value": "{{ $values.A | printf \"%.2f\" }}%"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-evloop-warn",
+          "title": "Event loop lag p99 high (warn)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "max by (instance) (n8n_nodejs_eventloop_lag_p99_seconds{job=\"n8n\"}) or max by (instance) (nodejs_eventloop_lag_seconds{job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [0.25] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "Event loop lag p99 > 250ms",
+            "description": "Node.js event loop lag indicates CPU or sync-work hotspots.",
+            "value": "{{ $values.A | printf \"%.3f\" }}s"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-evloop-crit",
+          "title": "Event loop lag p99 very high (critical)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "max by (instance) (n8n_nodejs_eventloop_lag_p99_seconds{job=\"n8n\"}) or max by (instance) (nodejs_eventloop_lag_seconds{job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [0.5] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "critical", "mode": "common" },
+          "annotations": {
+            "summary": "Event loop lag p99 > 500ms",
+            "description": "Severe lag on {{ $labels.instance }} – consider scaling or investigating heavy workflows.",
+            "value": "{{ $values.A | printf \"%.3f\" }}s"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-cpu-high",
+          "title": "CPU usage high (cores)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "sum by (instance) (rate(n8n_process_cpu_seconds_total{job=\"n8n\"}[5m])) or sum by (instance) (rate(process_cpu_seconds_total{job=\"n8n\"}[5m]))",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "avg" },
+                    "evaluator": { "type": "gt", "params": [0.9] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "10m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "High CPU usage",
+            "description": "Average CPU > 0.9 cores for 10m on {{ $labels.instance }}",
+            "value": "{{ $values.A | printf \"%.2f\" }} cores"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-rss-high",
+          "title": "RSS memory high",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "(n8n_process_resident_memory_bytes{job=\"n8n\"} or process_resident_memory_bytes{job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "avg" },
+                    "evaluator": { "type": "gt", "params": [891289600] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "10m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "High resident memory",
+            "description": "RSS > ~850 MiB for 10m on {{ $labels.instance }}",
+            "value": "{{ $values.A | humanize1024 }}B"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-fd-near-limit",
+          "title": "File descriptors near limit",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "100 * ((n8n_process_open_fds{job=\"n8n\"} or process_open_fds{job=\"n8n\"}) / clamp_min((n8n_process_max_fds{job=\"n8n\"} or process_max_fds{job=\"n8n\"}), 1))",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [80] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "FD usage > 80% of limit",
+            "description": "Open FDs approaching process limit on {{ $labels.instance }}",
+            "value": "{{ $values.A | printf \"%.1f\" }}%"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-version-skew",
+          "title": "Version skew detected",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "count(count by (version) (n8n_version_info{job=\"n8n\"}))",
+                "instant": true,
+                "legendFormat": "versions",
+                "range": false
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [1] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "0m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "common" },
+          "annotations": {
+            "summary": "Multiple n8n versions running",
+            "description": "Detected more than one n8n version across instances; may cause inconsistent behavior.",
+            "value": "{{ $values.A }}"
+          },
+          "isPaused": false
+        }
+      ]
+    },
+    {
+      "orgId": 1,
+      "name": "n8n - Queue mode",
+      "folder": "n8n Alerts",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "n8n-queue-backlog-warn",
+          "title": "Queue backlog present (warn)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "sum by (instance) (n8n_scaling_mode_queue_jobs_waiting{job=\"n8n\"}) or sum by (instance) ({__name__=~\"n8n_queue_.*_waiting\",job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "avg" },
+                    "evaluator": { "type": "gt", "params": [0] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "10m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "queue" },
+          "annotations": {
+            "summary": "Jobs waiting in queue > 0",
+            "description": "Backlog present for 10m on {{ $labels.instance }}. Consider scaling workers.",
+            "value": "{{ $values.A }}"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-queue-backlog-crit",
+          "title": "Queue backlog high (critical)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "sum by (instance) (n8n_scaling_mode_queue_jobs_waiting{job=\"n8n\"}) or sum by (instance) ({__name__=~\"n8n_queue_.*_waiting\",job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "last" },
+                    "evaluator": { "type": "gt", "params": [100] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "critical", "mode": "queue" },
+          "annotations": {
+            "summary": "Queue backlog > 100 jobs",
+            "description": "Backlog above threshold for 5m on {{ $labels.instance }}.",
+            "value": "{{ $values.A }}"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-queue-throughput-stalled",
+          "title": "Queue throughput stalled (critical)",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 900, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "sum by (instance) (n8n_scaling_mode_queue_jobs_active{job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "active {{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 900, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "sum by (instance) (rate(n8n_scaling_mode_queue_jobs_completed{job=\"n8n\"}[10m]) + rate(n8n_scaling_mode_queue_jobs_failed{job=\"n8n\"}[10m]))",
+                "instant": false,
+                "legendFormat": "throughput {{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "C",
+              "relativeTimeRange": { "from": 900, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "math",
+                "expression": "($A > 0) and ($B < 0.1)"
+              }
+            }
+          ],
+          "for": "15m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "critical", "mode": "queue" },
+          "annotations": {
+            "summary": "Queue active but throughput ~0",
+            "description": "Active jobs present while (completed+failed)/s < 0.1 for 15m on {{ $labels.instance }}.",
+            "value": "active>0 & throughput<0.1/s"
+          },
+          "isPaused": false
+        }
+      ]
+    },
+    {
+      "orgId": 1,
+      "name": "n8n - Single node",
+      "folder": "n8n Alerts",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "n8n-executions-stuck",
+          "title": "Executions stuck (single node)",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 900, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "(n8n_active_executions{job=\"n8n\"})",
+                "instant": false,
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 900, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "avg" },
+                    "evaluator": { "type": "gt", "params": [0] },
+                    "operator": { "type": "and" }
+                  },
+                  {
+                    "type": "query",
+                    "query": { "params": ["A"] },
+                    "reducer": { "type": "diff" },
+                    "evaluator": { "type": "lt", "params": [0.001] },
+                    "operator": { "type": "and" }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "15m",
+          "noDataState": "OK",
+          "execErrState": "OK",
+          "labels": { "severity": "warning", "mode": "single" },
+          "annotations": {
+            "summary": "Active executions but not progressing",
+            "description": "n8n_active_executions > 0 and nearly no change for 15m on {{ $labels.instance }}.",
+            "value": "{{ $values.A }}"
+          },
+          "isPaused": false
+        }
+      ]
+    }
+  ]
+}

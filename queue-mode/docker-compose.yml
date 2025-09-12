@@ -51,6 +51,8 @@ services:
     image: postgres:14
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
@@ -65,13 +67,15 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${STRONG_PASSWORD}"]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
       - redis-data:/data
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${STRONG_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 10s
       start_period: 10s
@@ -82,6 +86,10 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -106,7 +114,7 @@ services:
       - "traefik.http.routers.n8n.tls.certresolver=le"
       # Traefik 'service' label name
       - "traefik.http.routers.n8n.service=main"
-      - "traefik.http.services.main.loadbalancer.server.port=5678"
+      - "traefik.http.services.main.loadbalancer.server.port=${N8N_PORT:-5678}"
       # Middlewares
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
       - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
@@ -128,6 +136,8 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
     depends_on:
@@ -143,6 +153,8 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
@@ -173,6 +185,7 @@ services:
       - "traefik.docker.network=n8n-network"
       - "traefik.http.routers.prom.rule=Host(`${PROMETHEUS_FQDN}`)"
       - "traefik.http.routers.prom.entrypoints=websecure"
+      - "traefik.http.routers.prom.tls=true"
       - "traefik.http.routers.prom.tls.certresolver=le"
       - "traefik.http.services.prom.loadbalancer.server.port=9090"
       - "traefik.http.routers.prom.middlewares=prom-auth@docker"
@@ -183,6 +196,7 @@ services:
     image: grafana/grafana:latest
     restart: unless-stopped
     environment:
+      - TZ=${GENERIC_TIMEZONE}
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_BASIC_AUTH_PASS}
       - GF_SERVER_DOMAIN=${GRAFANA_FQDN}
@@ -223,9 +237,7 @@ services:
     image: quay.io/prometheuscommunity/postgres-exporter:latest
     restart: unless-stopped
     environment:
-      - DATA_SOURCE_URI=postgres:5432/${POSTGRES_DB}?sslmode=disable
-      - DATA_SOURCE_USER=${POSTGRES_USER}
-      - DATA_SOURCE_PASS=${POSTGRES_PASSWORD}
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
     depends_on:
@@ -238,7 +250,7 @@ services:
     restart: unless-stopped
     command:
       - "--redis.addr=redis:6379"
-      - "--redis.password=${STRONG_PASSWORD}"
+      - "--redis.password=${REDIS_PASSWORD}"
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
     depends_on:
@@ -289,4 +301,6 @@ volumes:
   letsencrypt:
     external: true
   prometheus-data:
+    external: true
   grafana-data:
+    external: true

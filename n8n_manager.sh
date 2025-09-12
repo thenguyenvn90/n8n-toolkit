@@ -7,22 +7,32 @@ IFS=$'\n\t'
 # N8N Installation, Upgrade, Backup & Restore Manager (Mode-aware: Single or Queue)
 # Author:      TheNguyen
 # Email:       thenguyen.ai.automation@gmail.com
-# Version:     2.0.0
-# Date:        2025-09-04
+# Version:     2.1.0
+# Date:        2025-09-06
 #
 # Description:
 #   A unified management tool for installing, upgrading, backing up, and restoring the
 #   n8n automation stack running on Docker Compose with Traefik + Let's Encrypt, supporting
-#   BOTH "single" mode and "queue" mode. For install, --mode defaults to "single". For other
-#   actions, the current mode is auto-detected from compose and containers.
+#   BOTH "single" mode and "queue" mode. For install, --mode defaults to "single".
+#
+#   This version adds:
+#     • Monitoring toggle via --monitoring (Prometheus, Grafana, exporters via Compose profiles)
+#     • Optional public Prometheus via --expose-prometheus (default private)
+#     • Base domain input (example.com), with subdomain defaults:
+#         - n8n.<domain>       for n8n
+#         - grafana.<domain>   for Grafana
+#         - prometheus.<domain> for Prometheus (if exposed)
+#       Overridable with:
+#         --subdomain-n8n, --subdomain-grafana, --subdomain-prometheus
 #
 # Key features:
 #   - Install:
 #       * --mode {single|queue} (default: single) chooses template folder (single-mode/ or queue-mode/)
 #       * Validates DNS, installs Docker/Compose if missing, pins version, generates secrets
+#       * Optional monitoring profile & subdomains persisted into .env
 #       * Brings stack up, waits for health, prints a summary
 #   - Upgrade:
-#       * No mode needed; auto-detects from current compose
+#       * Auto-detects mode from compose
 #       * Pulls/validates target version, redeploys safely (downgrade with -f)
 #   - Backup / Restore:
 #       * No mode needed; discovers services, volumes, and containers dynamically
@@ -62,6 +72,8 @@ DO_BACKUP=false
 DO_RESTORE=false
 DO_CLEANUP=false
 DO_AVAILABLE=false
+# Cleanup mode: safe (default) | all
+CLEANUP_MODE="safe"
 
 # Install-only
 INSTALL_MODE="single"
@@ -72,6 +84,18 @@ SSL_EMAIL=""
 N8N_VERSION="latest"
 FORCE_FLAG=false
 BACKUP_REQUIRE_TLS="${BACKUP_REQUIRE_TLS:-false}"
+
+# Monitoring & subdomain CLI overrides (defaults live in .env templates)
+MONITORING=false
+EXPOSE_PROMETHEUS=false
+SUBDOMAIN_N8N=""
+SUBDOMAIN_GRAFANA=""
+SUBDOMAIN_PROMETHEUS=""
+N8N_FQDN=""
+GRAFANA_FQDN=""
+PROMETHEUS_FQDN=""
+BASIC_AUTH_USER=""
+BASIC_AUTH_PASS=""
 
 # Backup/Restore
 TARGET_RESTORE_FILE=""
@@ -85,6 +109,7 @@ NOTIFY_ON_SUCCESS=false
 SMTP_USER="${SMTP_USER:-}"
 SMTP_PASS="${SMTP_PASS:-}"
 EMAIL_SENT=false
+EMAIL_ATTEMPTED=false
 
 # rclone remote path (e.g. gdrive:/n8n-backups)
 RCLONE_REMOTE=""
@@ -129,12 +154,12 @@ Actions (choose exactly one):
         List available n8n versions
 
   -i, --install <DOMAIN>
-        Install n8n with the given domain
+        Install n8n with the given base domain (e.g., example.com)
         Optional: --mode single|queue  (default: single)
         Optional: -v|--version <tag>
 
-  -u, --upgrade <DOMAIN>
-        Upgrade n8n to target version (or latest)
+  -u, --upgrade
+        Upgrade n8n to target version (or latest). Domain/FQDNs are read from .env.
 
   -b, --backup
         Run backup (skip if no changes unless -f)
@@ -142,8 +167,7 @@ Actions (choose exactly one):
   -r, --restore <FILE_OR_REMOTE>
         Restore from local file or rclone remote (e.g. gdrive:folder/file.tar.gz)
 
-  -c, --cleanup
-        Stop stack, remove volumes/images (interactive confirm)
+  -c, --cleanup [safe|all]  Stop stack & remove resources (preview; confirm in 'all')
 
 Options:
   --mode <single|queue>     (install only; default: single)
@@ -157,23 +181,35 @@ Options:
   -s, --remote-name <name>  rclone remote root (e.g. gdrive-user or gdrive-user:/n8n-backups)
   -h, --help                Show this help
 
+# Monitoring-related (install-time):
+  --monitoring                        Enable Prometheus/Grafana profile
+  --expose-prometheus                 Expose Prometheus publicly (default: private)
+  --subdomain-n8n <sub>               Override n8n subdomain (default: n8n)
+  --subdomain-grafana <sub>           Override Grafana subdomain (default: grafana)
+  --subdomain-prometheus <sub>        Override Prometheus subdomain (default: prometheus)
+  --basic-auth-user <user>            Traefik basic auth user for Grafana/Prometheus
+  --basic-auth-pass <pass>            Traefik basic auth pass for Grafana/Prometheus
+
 Examples:
   $0 -a
       # List available versions
 
-  $0 --install n8n.example.com -m you@example.com
+  $0 --install example.com -m you@example.com
       # Install the latest n8n version with single mode
 
-  $0 --install n8n.example.com -m you@example.com -v 1.105.3 --mode queue
+  $0 --install example.com -m you@example.com -v 1.105.3 --mode queue
       # Install a specific n8n version with queue mode
 
-  $0 --install n8n.example.com -m you@example.com -d /path/to/n8n --mode queue
+  $0 --install example.com -m you@example.com -d /path/to/n8n --mode queue
       # Install the latest n8n version (queue mode) to a specific target directory
 
-  $0 --upgrade n8n.example.com
-      # Upgrade to the latest n8n version
+  $0 --install example.com -m you@example.com --mode queue --monitoring --basic-auth-user admin --basic-auth-pass 'StrongPass123'
+      # Install the latest n8n version (queue mode) with monitoring (Grafana + Prometheus)
 
-  $0 --upgrade n8n.example.com -f -v 1.107.2
+  $0 --upgrade
+      # Upgrade to the latest n8n version (domain/FQDNs read from .env)
+
+  $0 --upgrade -f -v 1.107.2
       # Upgrade to a specific n8n version
 
   $0 --backup --remote-name gdrive-user --email-to ops@example.com --notify-on-success
@@ -222,157 +258,6 @@ set_paths() {
 }
 
 ################################################################################
-# install_prereqs()
-# Description:
-#   Install Docker Engine and Compose v2 with safe fallbacks, then common tools.
-#
-# Behaviors:
-#   - If Docker already works → skip engine install but still ensure deps.
-#   - Debian/Ubuntu family: use official Docker APT repo when codename supported.
-#   - Non-Debian/Ubuntu or unsupported codename: use convenience script.
-#   - Installs ancillary packages (jq, rsync, tar, msmtp-mta, dnsutils, openssl, pigz, vim).
-#   - Enables/starts docker via systemd when available.
-#   - Adds invoking user to the "docker" group (effective after re-login).
-#
-# Returns:
-#   0 on success; 1 if Docker not available after all attempts.
-################################################################################
-install_prereqs() {
-    # Fast path: Docker already installed and responding?
-    if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
-        log INFO "Docker already installed. Skipping engine install."
-    else
-        # Try to use APT repo on Debian/Ubuntu; otherwise fall back to script
-        . /etc/os-release 2>/dev/null || true
-        local DISTRO_ID="${ID:-}"
-        local DISTRO_LIKE="${ID_LIKE:-}"
-        local DISTRO_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
-        if [[ -z "$DISTRO_CODENAME" ]] && command -v lsb_release >/dev/null 2>&1; then
-            DISTRO_CODENAME="$(lsb_release -cs 2>/dev/null || true)"
-        fi
-
-        local is_deb_like=false
-        if [[ "$DISTRO_ID" =~ ^(debian|ubuntu)$ ]] || [[ "$DISTRO_LIKE" == *debian* ]] || [[ "$DISTRO_LIKE" == *ubuntu* ]]; then
-            is_deb_like=true
-        fi
-
-        if $is_deb_like && command -v apt-get >/dev/null 2>&1; then
-            log INFO "Detected Debian/Ubuntu family (ID=${DISTRO_ID:-?}, CODENAME=${DISTRO_CODENAME:-?})."
-            DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release || true
-
-            local repo_base="debian"
-            [[ "$DISTRO_ID" == "ubuntu" || "$DISTRO_LIKE" == *ubuntu* ]] && repo_base="ubuntu"
-
-            if [[ -z "$DISTRO_CODENAME" ]]; then
-                log WARN "Could not determine distro codename; using Docker convenience script."
-                curl -fsSL https://get.docker.com | sh
-            else
-                local REPO_CHECK_URL="https://download.docker.com/linux/${repo_base}/dists/${DISTRO_CODENAME}/Release"
-                if curl -fsS --connect-timeout 5 --max-time 10 "$REPO_CHECK_URL" >/dev/null 2>&1; then
-                    log INFO "Configuring Docker APT repo for ${repo_base} ${DISTRO_CODENAME}…"
-                    install -d -m 0755 /etc/apt/keyrings
-                    if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
-                        curl -fsSL "https://download.docker.com/linux/${repo_base}/gpg" \
-                          | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                        chmod a+r /etc/apt/keyrings/docker.gpg
-                    else
-                        log INFO "Docker GPG key already present."
-                    fi
-
-                    local arch; arch="$(dpkg --print-architecture)"
-                    echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${repo_base} ${DISTRO_CODENAME} stable" \
-                      > /etc/apt/sources.list.d/docker.list
-
-                    DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-                    log INFO "Installing Docker Engine and Compose v2 from Docker APT repo…"
-                    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-                        log WARN "APT install failed; falling back to Docker convenience script."
-                        curl -fsSL https://get.docker.com | sh
-                    fi
-                else
-                    log WARN "Docker repo does not publish '${repo_base}/${DISTRO_CODENAME}'; using convenience script."
-                    curl -fsSL https://get.docker.com | sh
-                fi
-            fi
-        else
-            log INFO "Non–Debian/Ubuntu or no apt-get detected (ID=${DISTRO_ID:-?}); using Docker convenience script."
-            curl -fsSL https://get.docker.com | sh
-        fi
-    fi
-
-    # Verify Docker availability
-    if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-        log ERROR "Docker installation did not complete successfully."
-        return 1
-    fi
-
-    # Ensure ancillary tools (best effort; only on apt-based systems)
-    if command -v apt-get >/dev/null 2>&1; then
-        log INFO "Installing common dependencies (jq, rsync, tar, msmtp-mta, dnsutils, openssl, pigz, vim)…"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            jq rsync tar msmtp-mta dnsutils openssl pigz vim || true
-    else
-        log WARN "apt-get not found; skipping ancillary package installation."
-    fi
-
-    # Enable/start docker via systemd when present
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable --now docker || true
-    fi
-
-    # Add invoking user to docker group (effective after re-login)
-    local CURRENT_USER="${SUDO_USER:-$(id -un)}"
-    if ! getent group docker >/dev/null 2>&1; then
-        log INFO "Creating 'docker' group…"
-        groupadd docker || true
-    fi
-    if [[ "$CURRENT_USER" != "root" ]]; then
-        log INFO "Adding user '$CURRENT_USER' to the 'docker' group (you may need to log out/in)…"
-        usermod -aG docker "$CURRENT_USER" || true
-    fi
-
-    # Quick version notes
-    log INFO "Docker version: $(docker --version 2>/dev/null || echo 'unknown')"
-    if docker compose version >/dev/null 2>&1; then
-        log INFO "Docker Compose v2: $(docker compose version 2>/dev/null | head -n1)"
-    else
-        log WARN "Docker Compose v2 not detected via 'docker compose'."
-    fi
-
-    log INFO "Docker and dependencies are ready."
-    return 0
-}
-
-################################################################################
-# prompt_ssl_email()
-# Description:
-#   Prompt operator for Let's Encrypt email if not given.
-#
-# Behaviors:
-#   - Simple regex validation; loops until ok.
-#
-# Returns:
-#   0 after exporting SSL_EMAIL.
-################################################################################
-prompt_ssl_email() {
-    if [[ ! -t 0 ]]; then
-        log ERROR "No TTY to prompt for --ssl-email. Please pass -m <email>."
-        exit 2
-    fi
-    while true; do
-        read -e -p "Enter your email address (used for SSL cert): " SSL_EMAIL
-        if [[ "$SSL_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            export SSL_EMAIL
-            break
-        else
-            log ERROR "Invalid email. Please try again."
-        fi
-    done
-}
-
-################################################################################
 # copy_templates_for_mode()
 # Description:
 #   Copy docker-compose.yml and .env from the selected template (single|queue).
@@ -389,7 +274,7 @@ copy_templates_for_mode() {
     local src_dir=""
     case "$INSTALL_MODE" in
         single) src_dir="$TEMPLATE_SINGLE" ;;
-        queue)  src_dir="$TEMPLATE_QUEUE" ;;
+        queue)  src_dir="$TEMPLATE_QUEUE"  ;;
         *) log ERROR "--mode must be 'single' or 'queue'"; exit 2 ;;
     esac
 
@@ -409,50 +294,79 @@ copy_templates_for_mode() {
     done
 
     # Update .env
-    log INFO "Updating .env with DOMAIN, SSL_EMAIL and N8N_IMAGE_TAG…"
+    log INFO "Updating DOMAIN=$DOMAIN in $ENV_FILE"
     upsert_env_var "DOMAIN" "$DOMAIN" "$ENV_FILE"
+
+    log INFO "Updating SSL_EMAIL=$SSL_EMAIL in $ENV_FILE"
     [[ -n "${SSL_EMAIL:-}" ]] && upsert_env_var "SSL_EMAIL" "$SSL_EMAIL" "$ENV_FILE"
 
     # Resolve target version: explicit -v wins; else latest stable
-    local target_version="${N8N_VERSION}"
-    if [[ -z "$target_version" || "$target_version" == "latest" ]]; then
-        target_version="$(get_latest_n8n_version)"
-        [[ -z "$target_version" ]] && { log ERROR "Could not determine latest n8n tag."; exit 1; }
-    fi
-
-    validate_image_tag "$target_version" || {
-        log ERROR "Image tag not found on docker.n8n.io or docker.io: $target_version"
-        exit 1
-    }
-
-    # Pin the tag into .env (insert or update)
-    log INFO "Installing n8n version: $target_version"
-    log INFO "Updating .env with N8N_IMAGE_TAG=$target_version"
+    local target_version
+    target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1
+    log INFO "Updating N8N_IMAGE_TAG=$target_version in $ENV_FILE"
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
 
-    # Rotate STRONG_PASSWORD if missing/default
-    local password_line
-    password_line=$(awk -F= '/^STRONG_PASSWORD=/{print $2; found=1} END{if(!found) print ""}' "$ENV_FILE")
-    if [[ "$password_line" == "CHANGE_ME_BASE64_16_BYTES" || -z "$password_line" ]]; then
-        local new_password
-        new_password="$(openssl rand -base64 16)"
-        log INFO "Setting STRONG_PASSWORD in .env"
-        upsert_env_var "STRONG_PASSWORD" "${new_password}" "$ENV_FILE"
-    else
-        log INFO "Existing STRONG_PASSWORD found. Not modifying it."
+    # Rotate SECRETS in env if missing/default
+    rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_BASIC_AUTH_PASSWORD  16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
+
+    # Queue mode only
+    if [[ "${INSTALL_MODE:-single}" == "queue" ]] || [[ "${DISCOVERED_MODE:-}" == "queue" ]]; then
+        rotate_or_generate_secret "$ENV_FILE" REDIS_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
     fi
 
-    # Rotate N8N_ENCRYPTION_KEY if missing/default
-    local enc_key_line
-    enc_key_line=$(awk -F= '/^N8N_ENCRYPTION_KEY=/{print $2; found=1} END{if(!found) print ""}' "$ENV_FILE")
-    if [[ -z "$enc_key_line" || "$enc_key_line" == "CHANGE_ME_BASE64_32_BYTES" ]]; then
-        local new_key
-        new_key="$(openssl rand -base64 32)"
-        log INFO "Setting N8N_ENCRYPTION_KEY in .env"
-        upsert_env_var "N8N_ENCRYPTION_KEY" "${new_key}" "$ENV_FILE"
+    # Subdomains & monitoring flags persisted in .env
+    [[ -n "$SUBDOMAIN_N8N" ]]        && upsert_env_var "SUBDOMAIN_N8N" "$SUBDOMAIN_N8N" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_GRAFANA" ]]    && upsert_env_var "SUBDOMAIN_GRAFANA" "$SUBDOMAIN_GRAFANA" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_PROMETHEUS" ]] && upsert_env_var "SUBDOMAIN_PROMETHEUS" "$SUBDOMAIN_PROMETHEUS" "$ENV_FILE"
+
+    if $MONITORING; then
+        upsert_env_var "COMPOSE_PROFILES" "monitoring" "$ENV_FILE"
+        local mon_src="$SCRIPT_DIR/monitoring"
+        local mon_dst="$N8N_DIR/monitoring"
+        if [[ -d "$mon_src" ]]; then
+            mkdir -p "$mon_dst"
+            cp -a "$mon_src/." "$mon_dst/"
+            log INFO "Copied monitoring assets into $mon_dst"
+            if [[ ! -f "$mon_dst/prometheus.yml" ]]; then
+                log ERROR "Expected file not found: $mon_dst/prometheus.yml (is it missing or a directory?)"
+                exit 1
+            fi
+        else
+            log WARN "Monitoring enabled but $mon_src not found; Prometheus/Grafana may fail to start."
+        fi
     else
-        log INFO "Existing N8N_ENCRYPTION_KEY found. Not modifying it."
+        upsert_env_var "COMPOSE_PROFILES" "" "$ENV_FILE"
     fi
+
+    # Ensure Traefik basic auth variables are consistent (always run)
+    ensure_monitoring_auth
+
+    if $EXPOSE_PROMETHEUS; then
+        upsert_env_var "EXPOSE_PROMETHEUS" "true" "$ENV_FILE"
+    else
+        upsert_env_var "EXPOSE_PROMETHEUS" "false" "$ENV_FILE"
+    fi
+
+    # persist explicit FQDNs
+    local base_dom sub_n8n sub_graf sub_prom
+    base_dom="$(read_env_var "$ENV_FILE" DOMAIN)"
+    sub_n8n="$(read_env_var "$ENV_FILE" SUBDOMAIN_N8N)"
+    sub_graf="$(read_env_var "$ENV_FILE" SUBDOMAIN_GRAFANA)"
+    sub_prom="$(read_env_var "$ENV_FILE" SUBDOMAIN_PROMETHEUS)"
+
+    sub_n8n="${sub_n8n:-n8n}"
+    sub_graf="${sub_graf:-grafana}"
+    sub_prom="${sub_prom:-prometheus}"
+
+    N8N_FQDN="${sub_n8n:+$sub_n8n.}${base_dom}"
+    GRAFANA_FQDN="${sub_graf:+$sub_graf.}${base_dom}"
+    PROMETHEUS_FQDN="${sub_prom:+$sub_prom.}${base_dom}"
+
+    upsert_env_var "N8N_FQDN" "$N8N_FQDN" "$ENV_FILE"
+    upsert_env_var "GRAFANA_FQDN" "$GRAFANA_FQDN" "$ENV_FILE"
+    upsert_env_var "PROMETHEUS_FQDN" "$PROMETHEUS_FQDN" "$ENV_FILE"
 
     # Secure secrets file
     chmod 600 "$ENV_FILE" || true
@@ -468,7 +382,7 @@ copy_templates_for_mode() {
 #   - --mode is optional; defaults to 'single'.
 #   - Prompts for SSL_EMAIL if missing.
 #   - Verifies DOMAIN DNS points to this host (check_domain()).
-#   - Installs Docker/Compose and dependencies (install_prereqs()).
+#   - Installs Docker/Compose and dependencies (ensure_prereqs()).
 #   - Prepares compose + .env with pinned version and secrets (copy_templates_for_mode()).
 #   - Validates compose/env (validate_compose_and_env()).
 #   - Creates volumes as needed and starts stack (docker_up_check()).
@@ -479,28 +393,44 @@ copy_templates_for_mode() {
 #   0 on success; exits non-zero if any step fails.
 ################################################################################
 install_stack() {
-    [[ -n "$DOMAIN" ]] || { log ERROR "Install requires a domain."; exit 2; }
-    log INFO "Starting N8N installation for domain: $DOMAIN"
-    [[ -z "${SSL_EMAIL:-}" ]] && prompt_ssl_email
-    check_domain
-    install_prereqs
+    [[ -n "$DOMAIN" ]] || { log ERROR "Install requires a base domain."; exit 2; }
+
+    log INFO "Starting N8N installation for base domain: $DOMAIN"
+    ensure_prereqs
     copy_templates_for_mode
-    validate_compose_and_env
     load_env_file
+    preflight_dns_checks
+    validate_compose_and_env
     discover_from_compose
-    # Ensure initial scale logic in docker_up_check applies on first boot
-    DISCOVERED_MODE="$([[ "$INSTALL_MODE" == "queue" ]] && echo queue || echo single)"
     ensure_external_volumes
+    [[ "$INSTALL_MODE" == "queue" ]] && DISCOVERED_MODE="queue"
+
     docker_up_check || { log ERROR "Stack unhealthy after install."; exit 1; }
+    post_up_tls_checks || true
+
+    # Summary
+    local graf_fqdn prom_fqdn expose_prom compose_profiles
+    graf_fqdn="$(read_env_var "$ENV_FILE" GRAFANA_FQDN || true)"
+    prom_fqdn="$(read_env_var "$ENV_FILE" PROMETHEUS_FQDN || true)"
+    expose_prom="$(read_env_var "$ENV_FILE" EXPOSE_PROMETHEUS || echo false)"
+    compose_profiles="$(read_env_var "$ENV_FILE" COMPOSE_PROFILES || true)"
 
     echo "═════════════════════════════════════════════════════════════"
     echo "N8N has been successfully installed!"
     box_line "Installation Mode:"       "$INSTALL_MODE"
-    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Domain (n8n):"           "https://${N8N_FQDN}"
+    if [[ "$compose_profiles" == *monitoring* ]]; then
+        box_line "Grafana:"             "https://${graf_fqdn}"
+        if [[ "${expose_prom,,}" == "true" ]]; then
+            box_line "Prometheus:"      "https://${prom_fqdn}"
+        else
+            box_line "Prometheus:"      "(internal only)"
+        fi
+    fi
     box_line "Installed Version:"       "$(get_current_n8n_version)"
     box_line "Install Timestamp:"       "${DATE}"
     box_line "Installed By:"            "${SUDO_USER:-$USER}"
-    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "Target Directory:"        "${N8N_DIR}"
     box_line "SSL Email:"               "${SSL_EMAIL:-N/A}"
     box_line "Execution log:"           "${LOG_FILE}"
     echo "═════════════════════════════════════════════════════════════"
@@ -526,21 +456,17 @@ install_stack() {
 upgrade_stack() {
     [[ -f "$ENV_FILE" && -f "$COMPOSE_FILE" ]] || { log ERROR "Compose/.env not found in $N8N_DIR"; exit 1; }
     load_env_file
-    log INFO "Checking current and latest n8n versions..."
+    ensure_monitoring_auth
+    N8N_FQDN="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
+
+    log INFO "Checking current and target n8n versions..."
     cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
 
     local current_version target_version
     current_version=$(get_current_n8n_version || echo "0.0.0")
-    # Decide target version
-    target_version="$N8N_VERSION"
-    if [[ -z "$target_version" || "$target_version" == "latest" ]]; then
-        target_version=$(get_latest_n8n_version)
-        [[ -z "$target_version" ]] && { log ERROR "Could not determine latest n8n tag."; exit 1; }
-    fi
-
+    target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1
     log INFO "Current version: $current_version  ->  Target version: $target_version"
 
-    # Refuse to downgrade unless -f
     if [[ "$(printf "%s\n%s" "$target_version" "$current_version" | sort -V | head -n1)" == "$target_version" \
           && "$target_version" != "$current_version" \
           && "$FORCE_FLAG" != true ]]; then
@@ -548,16 +474,12 @@ upgrade_stack() {
         exit 0
     fi
 
-    # If same version, allow redeploy only with -f
     if [[ "$target_version" == "$current_version" && "$FORCE_FLAG" != true ]]; then
         log INFO "Already on $current_version. Use -f to force redeploy."
         exit 0
     fi
 
-    # Validate tag exists (either registry)
-    validate_image_tag "$target_version" || { log ERROR "Image tag not found: $target_version"; exit 1; }
-
-    # Pin the tag into .env (insert or update)
+    log INFO "Updating .env with N8N_IMAGE_TAG=$target_version"
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
 
     log INFO "Stopping and removing existing containers..."
@@ -565,113 +487,20 @@ upgrade_stack() {
 
     validate_compose_and_env
     discover_from_compose
+
     docker_up_check || { log ERROR "Stack unhealthy after upgrade."; exit 1; }
+    post_up_tls_checks || true
 
     echo "═════════════════════════════════════════════════════════════"
     echo "N8N has been successfully upgraded!"
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://${DOMAIN}"
+    box_line "Domain (n8n):"            "https://${N8N_FQDN}"
     box_line "Upgraded Version:"        "$(get_current_n8n_version)"
     box_line "Upgraded Timestamp:"      "${DATE}"
     box_line "Upgraded By:"             "${SUDO_USER:-$USER}"
-    box_line "Target Directory:"        "$N8N_DIR"
+    box_line "Target Directory:"        "${N8N_DIR}"
     box_line "Execution log:"           "${LOG_FILE}"
     echo "═════════════════════════════════════════════════════════════"
-}
-
-################################################################################
-# snapshot_bootstrap()
-# Description:
-#   Create the initial snapshot tree for change detection.
-#
-# Behaviors:
-#   - Creates snapshot directories for each volume and for config.
-#   - Rsyncs current data of volumes and config (.env, docker-compose.yml).
-#   - Skips if snapshot already exists.
-#
-# Returns:
-#   0 on success; non-zero on failure.
-################################################################################
-snapshot_bootstrap() {
-    local snap="$BACKUP_DIR/snapshot"
-    [[ -d "$snap" ]] || mkdir -p "$snap/volumes" "$snap/config"
-
-    local vol
-    for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        mkdir -p "$snap/volumes/$vol"
-        rsync -a "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" || true
-    done
-    [[ -f "$ENV_FILE" ]] && rsync -a "$ENV_FILE" "$snap/config/" || true
-    [[ -f "$COMPOSE_FILE" ]] && rsync -a "$COMPOSE_FILE" "$snap/config/" || true
-}
-
-################################################################################
-# snapshot_refresh()
-# Description:
-#   Refresh snapshot after successful backup.
-#
-# Behaviors:
-#   - Rsync with --delete for each discovered volume and config.
-#
-# Returns:
-#   0 on success.
-################################################################################
-snapshot_refresh() {
-    local snap="$BACKUP_DIR/snapshot"
-    mkdir -p "$snap/volumes" "$snap/config"
-    local vol
-    for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        rsync -a --delete \
-            --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
-            "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" || true
-    done
-    [[ -f "$ENV_FILE" ]] && rsync -a --delete "$ENV_FILE" "$snap/config/" || true
-    [[ -f "$COMPOSE_FILE" ]] && rsync -a --delete "$COMPOSE_FILE" "$snap/config/" || true
-}
-
-################################################################################
-# is_changed_since_snapshot()
-# Description:
-#   Determine if live data differs from the snapshot (to decide backup).
-#
-# Behaviors:
-#   - For each volume: rsync dry-run with excludes (pg_wal, pg_stat_tmp, pg_logical).
-#   - For configs: rsync dry-run on .env and docker-compose.yml (only if they exist).
-#   - Creates snapshot target dirs if missing.
-#   - If any file changes detected → considered "changed".
-#
-# Returns:
-#   0 if changed; 1 if no differences.
-################################################################################
-is_changed_since_snapshot() {
-    local snap="$BACKUP_DIR/snapshot"
-    mkdir -p "$snap/volumes" "$snap/config"
-    local vol diffs
-
-    for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        diffs="$(rsync -rtun \
-            --exclude='pg_wal/**' --exclude='pg_stat_tmp/**' --exclude='pg_logical/**' \
-            "/var/lib/docker/volumes/${vol}/_data/" "$snap/volumes/$vol/" | grep -v '/$' || true)"
-        if [[ -n "$diffs" ]]; then
-            log INFO "Change detected in volume: $vol"
-            log DEBUG "  $diffs"
-            return 0
-        fi
-    done
-
-    local f
-    for f in "$ENV_FILE" "$COMPOSE_FILE"; do
-        [[ -f "$f" ]] || continue
-        diffs="$(rsync -rtun --out-format="%n" "$f" "$snap/config/" | grep -v '/$' || true)"
-        if [[ -n "$diffs" ]]; then
-            log INFO "Change detected in config: $f"
-            log DEBUG "  $diffs"
-            return 0
-        fi
-    done
-
-    # No differences found
-    return 1
 }
 
 ################################################################################
@@ -711,17 +540,18 @@ do_local_backup() {
     log INFO "Backing up Docker volumes..."
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        if ! docker volume inspect "$vol" &>/dev/null; then
-            log ERROR "Volume $vol not found"
-            return 1
+        real="$(resolve_volume_name "$vol" || true)"
+        if [[ -z "$real" ]]; then
+            log INFO "Skipping volume '$vol' (not present on host)."
+            continue
         fi
         local vol_backup="volume_${vol}_$DATE.tar.gz"
         docker run --rm \
-            -v "${vol}:/data" \
+            -v "${real}:/data" \
             -v "$BACKUP_PATH:/backup" \
             alpine \
             sh -c "tar czf /backup/$vol_backup -C /data ." \
-                || { log ERROR "Failed to archive volume $vol"; return 1; }
+            || { log ERROR "Failed to archive volume $vol"; return 1; }
         log INFO "Volume '$vol' backed up: $vol_backup"
     done
 
@@ -776,6 +606,9 @@ do_local_backup() {
         return 1
     fi
     log INFO "Created checksum -> $BACKUP_DIR/$BACKUP_FILE.sha256"
+
+    chmod 600 "$BACKUP_DIR/"*.tar.gz 2>/dev/null || true
+    chmod 600 "$BACKUP_DIR/"*.sha256 2>/dev/null || true
 
     log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days..."
     rm -rf "$BACKUP_PATH"
@@ -882,109 +715,6 @@ EOF
 }
 
 ################################################################################
-# can_send_email()
-# Description:
-#   Check whether SMTP config is sufficient to send email.
-#
-# Behaviors:
-#   - Verifies EMAIL_TO, SMTP_USER, SMTP_PASS are all non-empty.
-#
-# Returns:
-#   0 if all present; 1 otherwise.
-################################################################################
-can_send_email() {
-    [[ "$EMAIL_EXPLICIT" == true && -n "$SMTP_USER" && -n "$SMTP_PASS" && -n "$EMAIL_TO" ]]
-}
-
-################################################################################
-# send_email()
-# Description:
-#   Send a multipart email via Gmail SMTP (msmtp), optional attachment.
-#
-# Behaviors:
-#   - No-op if EMAIL_EXPLICIT=false.
-#   - Validates SMTP creds; logs error and returns non-zero if missing.
-#   - Builds multipart MIME with text body and optional base64 attachment.
-#   - Pipes message to msmtp with STARTTLS (smtp.gmail.com:587).
-#   - Sets EMAIL_SENT=true on success.
-#
-# Returns:
-#   0 on success; non-zero if send fails.
-################################################################################
-send_email() {
-    local subject="$1"
-    local body="$2"
-    local attachment="${3:-}"
-
-    require_cmd msmtp || { log ERROR "msmtp not available; cannot send email."; return 1; }
-
-    if ! $EMAIL_EXPLICIT; then
-        # user never asked → silently skip
-        return 0
-    fi
-
-    if ! can_send_email; then
-        log ERROR "Email requested (-e) but SMTP_USER/SMTP_PASS not set → cannot send email."
-        return 1
-    fi
-
-    log INFO "Sending email to: $EMAIL_TO"
-
-    # Prepare password securely for passwordeval
-    local pass_tmp
-    pass_tmp="$(mktemp)"
-    printf '%s' "$SMTP_PASS" > "$pass_tmp"
-    chmod 600 "$pass_tmp"
-
-    local boundary="=====n8n_backup_$(date +%s)_$$====="
-    {
-        echo "From: $SMTP_USER"
-        echo "To: $EMAIL_TO"
-        echo "Subject: $subject"
-        echo "MIME-Version: 1.0"
-        echo "Content-Type: multipart/mixed; boundary=\"$boundary\""
-        echo
-        echo "--$boundary"
-        echo "Content-Type: text/plain; charset=UTF-8"
-        echo "Content-Transfer-Encoding: 7bit"
-        echo
-        echo "$body"
-        echo
-
-        if [[ -n "$attachment" && -f "$attachment" ]]; then
-            local filename
-            filename="$(basename "$attachment")"
-            echo "--$boundary"
-            echo "Content-Type: application/octet-stream; name=\"$filename\""
-            echo "Content-Transfer-Encoding: base64"
-            echo "Content-Disposition: attachment; filename=\"$filename\""
-            echo
-            base64 "$attachment"
-            echo
-        fi
-
-        echo "--$boundary--"
-    } | msmtp \
-        --host=smtp.gmail.com \
-        --port=587 \
-        --auth=on \
-        --tls=on \
-        --from="$SMTP_USER" \
-        --user="$SMTP_USER" \
-        --passwordeval="cat $pass_tmp" \
-        "$EMAIL_TO"
-
-    local rc=$?
-    rm -f "$pass_tmp"
-    if [[ $rc -eq 0 ]]; then
-        log INFO "Email sent with subject: $subject"
-        EMAIL_SENT=true
-    else
-        log WARN "Failed to send email with subject: $subject"
-    fi
-}
-
-################################################################################
 # send_mail_on_action()
 # Description:
 #   Decide whether and what to email based on BACKUP_STATUS/UPLOAD_STATUS.
@@ -1002,7 +732,6 @@ send_email() {
 send_mail_on_action() {
     local subject body
 
-    # Determine subject/body based on statuses:
     if [[ "$BACKUP_STATUS" == "FAIL" ]]; then
         subject="$DATE: n8n Backup FAILED locally"
         body="An error occurred during the local backup step. See attached log.
@@ -1049,21 +778,24 @@ Log File: $LOG_FILE"
   Log File: $LOG_FILE"
     fi
 
-    # Decide whether to send email:
-    if [[ "$BACKUP_STATUS" == "FAIL" ]] || [[ "$UPLOAD_STATUS" == "FAIL" ]]; then
-        # failures: attach the log
-        send_email "$subject" "$body" "$LOG_FILE"
+    # Decide whether to send email (policy lives here; common.sh only sends)
+    EMAIL_SENT=false
+    if ! $EMAIL_EXPLICIT; then
+        return 0
+    fi
 
+    if [[ "$BACKUP_STATUS" == "FAIL" || "$UPLOAD_STATUS" == "FAIL" ]]; then
+        EMAIL_ATTEMPTED=true
+        send_email "$subject" "$body" "$LOG_FILE" && EMAIL_SENT=true
     elif [[ "$BACKUP_STATUS" == "SKIPPED" ]]; then
-        # skipped: only notify if explicitly requested
         if [[ "$NOTIFY_ON_SUCCESS" == true ]]; then
-            send_email "$subject" "$body"
+            EMAIL_ATTEMPTED=true
+            send_email "$subject" "$body" && EMAIL_SENT=true
         fi
-
     else
-        # success & upload success: only if notify-on-success
         if [[ "$NOTIFY_ON_SUCCESS" == true ]]; then
-            send_email "$subject" "$body" "$LOG_FILE"
+            EMAIL_ATTEMPTED=true
+            send_email "$subject" "$body" && EMAIL_SENT=true
         fi
     fi
 }
@@ -1094,27 +826,28 @@ summarize_backup() {
     local email_status email_reason
     log INFO "Print a summary of what happened..."
 
-    # Determine whether an email was sent
     if ! $EMAIL_EXPLICIT; then
-        email_status="SKIPPED"
-        email_reason="(not requested)"
-    elif $EMAIL_SENT; then
-        email_status="SUCCESS"
-        email_reason=""
-    else
-        if [[ -z "$SMTP_USER" || -z "$SMTP_PASS" || -z "$EMAIL_TO" ]]; then
-            email_status="ERROR"
-            email_reason="(missing SMTP config)"
+        email_status="SKIPPED"; email_reason="(not requested)"
+    elif $EMAIL_ATTEMPTED; then
+        if $EMAIL_SENT; then
+            email_status="SUCCESS"; email_reason=""
         else
-            email_status="FAILED"
-            email_reason="(send failed)"
+            if [[ -z "$SMTP_USER" || -z "$SMTP_PASS" || -z "$EMAIL_TO" ]]; then
+                email_status="ERROR";  email_reason="(missing SMTP config)"
+            else
+                email_status="FAILED"; email_reason="(send failed)"
+            fi
         fi
+    else
+        email_status="SKIPPED"; email_reason="(policy: not required)"
     fi
 
+    local n8n_fqdn
+    n8n_fqdn="$(read_env_var "$ENV_FILE" N8N_FQDN)"
     echo "═════════════════════════════════════════════════════════════"
     echo "Backup completed!"
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://$DOMAIN"
+    box_line "Domain (n8n):"            "https://${n8n_fqdn}"
     box_line "Backup Action:"           "$ACTION"
     box_line "Backup Status:"           "$BACKUP_STATUS"
     box_line "Backup Timestamp:"        "$DATE"
@@ -1124,16 +857,9 @@ summarize_backup() {
     box_line "Log File:"                "$LOG_FILE"
     box_line "Daily tracking:"          "$summary_file"
     case "$UPLOAD_STATUS" in
-        "SUCCESS")
-            box_line "Remote upload:"          "SUCCESS"
-            box_line "Remote folder link:"     "$DRIVE_LINK"
-            ;;
-        "SKIPPED")
-            box_line "Remote upload:" "SKIPPED"
-            ;;
-        *)
-            box_line "Remote upload:" "FAILED"
-            ;;
+        "SUCCESS") box_line "Remote upload:" "SUCCESS"; box_line "Remote folder link:" "$DRIVE_LINK" ;;
+        "SKIPPED") box_line "Remote upload:" "SKIPPED" ;;
+        *)         box_line "Remote upload:" "FAILED"  ;;
     esac
     if [[ -n "$email_reason" ]]; then
         box_line "Email notification:" "$email_status $email_reason"
@@ -1163,11 +889,19 @@ backup_stack() {
     UPLOAD_STATUS=""
     BACKUP_FILE=""
     DRIVE_LINK=""
+
     load_env_file
     discover_from_compose
     detect_mode_runtime || true
-    snapshot_bootstrap
 
+    N8N_FQDN="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
+
+    # Initialize snapshot baseline only if missing
+    if [[ ! -d "$BACKUP_DIR/snapshot/config" ]]; then
+        snapshot_sync boot
+    fi
+
+    # Change detection (skip unless forced)
     if is_changed_since_snapshot; then
         ACTION="Backup (normal)"
     elif [[ "$FORCE_FLAG" == true ]]; then
@@ -1184,14 +918,15 @@ backup_stack() {
     wait_for_containers_healthy || return 1
 
     if [[ "$BACKUP_REQUIRE_TLS" == "true" ]]; then
-        verify_traefik_certificate "$DOMAIN" || return 1
+        verify_traefik_certificate "$N8N_FQDN" || return 1
     fi
 
     if do_local_backup; then
         BACKUP_STATUS="SUCCESS"
         log INFO "Local backup succeeded: $BACKUP_FILE"
-        # Refresh our snapshot so next run sees “no changes”
-        snapshot_refresh
+        # Refresh snapshot so next run sees “no changes”
+        snapshot_sync refresh
+        write_summary_row "$ACTION" "$BACKUP_STATUS"
     else
         BACKUP_STATUS="FAIL"
         log ERROR "Local backup failed."
@@ -1201,81 +936,19 @@ backup_stack() {
         return 1
     fi
 
-    # upload if requested
+    # Remote upload (optional)
     if [[ -n "$RCLONE_REMOTE" ]]; then
         upload_backup_rclone || true
     else
         UPLOAD_STATUS="SKIPPED"
     fi
 
-    # Record in rolling summary
-    # cache the Google Drive (remote) link exactly once
-
-
-    # cache the Google Drive link exactly once
+    # Cache Google Drive folder link (if rclone remote is Google Drive)
     DRIVE_LINK="$(get_google_drive_link)"
 
-    # Final email notification
+    # Final email + console summary
     send_mail_on_action
-
-    # Console summary
     summarize_backup
-}
-
-################################################################################
-# fetch_remote_if_needed()
-# Description:
-#   If TARGET_RESTORE_FILE points to an rclone remote, download it locally
-#   and verify checksum when available.
-#
-# Behaviors:
-#   - No-op if TARGET_RESTORE_FILE already exists locally.
-#   - For "remote:path/file": downloads to BACKUP_DIR/_restore_tmp/<sanitized_name>.
-#   - Attempts to fetch .sha256 and verify via sha256sum -c.
-#   - Rewrites TARGET_RESTORE_FILE to the local path on success.
-#
-# Returns:
-#   0 on success; non-zero on download/verification failure.
-################################################################################
-fetch_remote_if_needed() {
-    # Already a real local file? nothing to do.
-    if [[ -f "$TARGET_RESTORE_FILE" ]]; then
-        return 0
-    fi
-
-    # Heuristic: looks like "remote:path/..." (and not an absolute local path)
-    if [[ "$TARGET_RESTORE_FILE" == *:* && "$TARGET_RESTORE_FILE" != /* ]]; then
-        require_cmd rclone || { log ERROR "rclone required to fetch remote backup."; return 1; }
-
-        local tmp_dir="$BACKUP_DIR/_restore_tmp"
-        mkdir -p "$tmp_dir"
-
-        # Derive a local filename (keep the basename of the remote object)
-        # Sanitize basename: replace ':' with '_'
-        local base
-        base="$(basename "$TARGET_RESTORE_FILE" | tr ':' '_')"
-        local local_path="$tmp_dir/$base"
-
-        log INFO "Fetching backup from remote: $TARGET_RESTORE_FILE"
-        if rclone copyto "$TARGET_RESTORE_FILE" "$local_path" "${RCLONE_FLAGS[@]}"; then
-            log INFO "Downloaded to: $local_path"
-            # try to fetch checksum and verify if available
-            log INFO "Verifying checksum..."
-            if rclone copyto "${TARGET_RESTORE_FILE}.sha256" "${local_path}.sha256" "${RCLONE_FLAGS[@]}"; then
-                ( cd "$tmp_dir" \
-                    && sha256sum -c "$(basename "${local_path}.sha256")" ) \
-                    || { log ERROR "Checksum verification failed for $local_path"; return 1; }
-                log INFO "Checksum verified."
-            else
-                log WARN "Checksum file not found remotely. Skipping verification."
-            fi
-            TARGET_RESTORE_FILE="$local_path"
-            echo "$TARGET_RESTORE_FILE" > "$tmp_dir/.last_fetched"
-        else
-            log ERROR "Failed to fetch remote backup: $TARGET_RESTORE_FILE"
-            return 1
-        fi
-    fi
 }
 
 ################################################################################
@@ -1287,7 +960,7 @@ fetch_remote_if_needed() {
 #   - Fetches remote archive if needed; extracts to temp dir.
 #   - Validates .env.bak (with N8N_ENCRYPTION_KEY) and docker-compose.yml.bak,
 #     then restores them to N8N_DIR and reloads env.
-#   - Stops stack (compose down --volumes --remove-orphans).
+#   - Stops stack (compose down --remove-orphans), then explicitly removes/recreates volumes.
 #   - If DB dump (*.dump or *.sql) present → skip postgres-data volume restore.
 #   - Recreates and restores non-DB volumes from their tarballs.
 #   - Starts postgres, waits healthy, then:
@@ -1367,6 +1040,7 @@ restore_stack() {
     # Reload restored .env so later steps (DOMAIN, etc.) reflect the restored config
     load_env_file
     discover_from_compose
+    N8N_FQDN="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
 
     # Stop and remove the current containers before cleaning volumes
     log INFO "Stopping and removing containers before restore..."
@@ -1395,34 +1069,37 @@ restore_stack() {
     log INFO "Cleaning existing Docker volumes before restore..."
     local vol
     for vol in "${RESTORE_VOLUMES[@]}"; do
-        if [[ "$vol" == "letsencrypt" ]]; then
-            log INFO "Skipping volume '$vol' (TLS certs) during restore."
-            continue
-        fi
-        if docker volume inspect "$vol" >/dev/null 2>&1; then
-            docker volume rm "$vol" && log INFO "Removed volume: $vol"
-        else
-            log INFO "Volume '$vol' not found, skipping..."
-        fi
+    if [[ "$vol" == "letsencrypt" ]]; then
+        log INFO "Skipping volume '$vol' (TLS certs) during restore."
+        continue
+    fi
+    real="$(resolve_volume_name "$vol" || expected_volume_name "$vol")"
+    if docker volume inspect "$real" >/dev/null 2>&1; then
+        docker volume rm "$real" && log INFO "Removed volume: $vol"
+    else
+        log INFO "Volume '$vol' not found, skipping..."
+    fi
     done
 
     # Restore Docker volumes
     log INFO "Restoring volumes from archive..."
     for vol in "${RESTORE_VOLUMES[@]}"; do
-        local vol_file
-        vol_file="$(find "$restore_dir" -name "*${vol}_*.tar.gz" -print -quit || true)"
-        if [[ -z "${vol_file:-}" ]]; then
-            log ERROR "No backup found for volume $vol"
-            return 1
-        fi
-        docker volume create "$vol" >/dev/null
+    local vol_file
+    vol_file="$(find "$restore_dir" -name "*${vol}_*.tar.gz" -print -quit || true)"
+    if [[ -z "${vol_file:-}" ]]; then
+        log ERROR "No backup found for volume $vol"
+        return 1
+    fi
 
-        docker run --rm -v "${vol}:/data" -v "$restore_dir:/backup" alpine \
-            sh -c "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
-            && tar xzf /backup/$(basename "$vol_file") -C /data" \
-            || { log ERROR "Failed to restore $vol"; return 1; }
+    real="$(expected_volume_name "$vol")"
+    docker volume create "$real" >/dev/null
 
-        log INFO "Volume $vol restored"
+    docker run --rm -v "${real}:/data" -v "$restore_dir:/backup" alpine \
+        sh -c "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+        && tar xzf /backup/$(basename "$vol_file") -C /data" \
+        || { log ERROR "Failed to restore $vol"; return 1; }
+
+    log INFO "Volume $vol restored"
     done
 
     log INFO "Start working on $N8N_DIR ..."
@@ -1452,27 +1129,17 @@ restore_stack() {
     local ADMIN_PASS="$(_read_env_var_from_container "$PG_CID" POSTGRES_PASSWORD)"
 
     local POSTGRES_RESTORE_MODE=""
+    log INFO "Recreating database ${DB_NAME}..."
 
     if [[ -n "$dump_file" ]]; then
         POSTGRES_RESTORE_MODE="dump"
         log INFO "Custom dump found: $(basename "$dump_file"). Restoring via pg_restore..."
-        log INFO "Recreate database ${DB_NAME}..."
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        postgres_recreate_db "$PG_CID" "$ADMIN_USER" "$ADMIN_PASS" "$DB_NAME" "$DB_USER"
         docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" pg_restore -U "$ADMIN_USER" -d "${DB_NAME}" -c -v < "$dump_file"
-
-
     elif [[ -n "$sql_file" ]]; then
         POSTGRES_RESTORE_MODE="sql"
         log INFO "SQL dump found: $(basename "$sql_file"). Restoring via psql..."
-        log INFO "Recreate database ${DB_NAME}..."
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" || true
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-        docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+        postgres_recreate_db "$PG_CID" "$ADMIN_USER" "$ADMIN_PASS" "$DB_NAME" "$DB_USER"
         docker exec -e PGPASSWORD="$ADMIN_PASS" -i "$PG_CID" psql -U "$ADMIN_USER" -d "${DB_NAME}" -v ON_ERROR_STOP=1 < "$sql_file"
     else
         POSTGRES_RESTORE_MODE="volume"
@@ -1482,7 +1149,9 @@ restore_stack() {
     # When the PostgreSQL DB is ready, start other containers
     log INFO "Starting the rest of the stack..."
     ensure_external_volumes
+
     docker_up_check || { log ERROR "Stack unhealthy after restore."; return 1; }
+    post_up_tls_checks || true
 
     log INFO "Cleaning up..."
     rm -rf "$restore_dir"
@@ -1505,7 +1174,7 @@ restore_stack() {
     echo "═════════════════════════════════════════════════════════════"
     echo "Restore completed successfully."
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
-    box_line "Domain:"                  "https://$DOMAIN"
+    box_line "Domain (n8n):"            "https://${N8N_FQDN}"
     box_line "Restore from file:"       "$requested_spec"
     box_line "Local archive used:"      "$TARGET_RESTORE_FILE"
     box_line "Restore Timestamp:"       "$DATE"
@@ -1513,112 +1182,266 @@ restore_stack() {
     box_line "N8N Directory:"           "$N8N_DIR"
     box_line "Log File:"                "$LOG_FILE"
     box_line "Volumes restored:"        "${restored_list}"
-    if [[ "$POSTGRES_RESTORE_MODE" == "dump" ]]; then
-        box_line "PostgreSQL:"           "Restored from SQL dump"
-    else
-        box_line "PostgreSQL:"           "Restored from volume"
-    fi
+    case "$POSTGRES_RESTORE_MODE" in
+        dump) box_line "PostgreSQL:" "Restored from custom dump (.dump)";;
+        sql)  box_line "PostgreSQL:" "Restored from SQL file (.sql)";;
+        *)    box_line "PostgreSQL:" "Restored from volume";;
+    esac
     echo "═════════════════════════════════════════════════════════════"
 }
 
 ################################################################################
 # cleanup_stack()
-# Description:
-#   Interactively tear down the stack and remove named resources.
 #
-# Behaviors:
-#   - Prints a plan and asks for confirmation.
-#   - Runs `compose down --remove-orphans`.
-#   - Removes named volumes in VOLUMES; respects KEEP_CERTS=true for letsencrypt.
-#   - Prunes dangling images; optionally removes base images if REMOVE_IMAGES=true.
-#   - Logs completion and whether certs were preserved.
+# Purpose
+#   Tear down the n8n Docker stack and remove project resources with two
+#   levels of aggressiveness, while clearly previewing what will be deleted.
 #
-# Returns:
-#   0 on completion; 0 if user cancels; non-zero only on unexpected errors.
+# Modes
+#   safe (default via CLEANUP_MODE=safe)
+#     - Runs `docker compose down --remove-orphans`
+#     - Deletes named project volumes EXCEPT `letsencrypt`
+#       (preserves TLS certs to avoid Let's Encrypt rate limits)
+#     - Removes discovered project Docker networks
+#     - Prunes dangling images (`docker image prune -f`)
+#     - Keeps base images (n8nio/n8n, docker.n8n.io/n8nio/n8n, postgres)
+#     - Does NOT wipe files in $N8N_DIR
+#
+#   all  (CLEANUP_MODE=all)
+#     - Runs `docker compose down --remove-orphans -v` (also drops anonymous vols)
+#     - Deletes ALL named project volumes, including `letsencrypt`
+#     - Removes discovered project Docker networks
+#     - Prunes dangling images AND removes base images (n8n + postgres)
+#     - Wipes the project directory $N8N_DIR (via safe_wipe_target_dir)
+#     - Prompts for a yes/no confirmation before executing
+#
+# What it does (high level)
+#   1) Discovers compose-defined volumes and networks
+#   2) Builds the exact deletion sets (volumes, networks, images, dir entries)
+#   3) Prints a PREVIEW block showing every item that will be removed
+#   4) If mode = all, asks for interactive confirmation (yes/no)
+#   5) Executes the plan:
+#        - docker compose down (with flags per mode)
+#        - docker volume rm <named volumes>
+#        - docker network rm <project networks>
+#        - docker image prune -f
+#        - (all) docker rmi -f <base images by ID>
+#        - (all) safe_wipe_target_dir
 ################################################################################
 cleanup_stack() {
     discover_from_compose
-    # Settings (can be overridden via env)
-    local NETWORK_NAME="${NETWORK_NAME:-n8n-network}"
-    local KEEP_CERTS="${KEEP_CERTS:-true}"
-    local REMOVE_IMAGES="${REMOVE_IMAGES:-false}"
+    discover_compose_networks || true
 
-    log WARN "This will stop containers, remove the compose stack, and delete named resources."
-    echo "Planned actions:"
-    echo "  - docker compose down --remove-orphans -v"
-    echo "  - Remove volumes: ${DISCOVERED_VOLUMES[*]}  (letsencrypt kept: ${KEEP_CERTS})"
-    echo "  - Remove docker network: ${NETWORK_NAME}"
-    echo "  - Remove dangling images (docker image prune -f)"
-    echo "  - Remove base images (n8nio/n8n, postgres) : ${REMOVE_IMAGES}"
-    echo
+    local MODE="${CLEANUP_MODE:-safe}"
+    local NUKE_ALL=false
+    case "$MODE" in
+        safe) NUKE_ALL=false ;;
+        all)  NUKE_ALL=true  ;;
+        *)    log ERROR "cleanup mode must be 'safe' or 'all', got '$MODE'"; exit 2 ;;
+    esac
 
-    read -e -p "Continue? [y/N] " ans
-    [[ "${ans,,}" == "y" ]] || { log INFO "Cleanup cancelled."; return 0; }
+    # Flags for compose down
+    local -a DOWN_FLAGS=(--remove-orphans)
+    $NUKE_ALL && DOWN_FLAGS+=(-v)   # in ALL, also remove anonymous volumes
 
-    log INFO "Shutting down stack (respect KEEP_CERTS=${KEEP_CERTS})..."
-    local -a down_flags=(--remove-orphans)
-    [[ "$KEEP_CERTS" == "false" ]] && down_flags+=(-v)
-
-    if [[ -f "$N8N_DIR/docker-compose.yml" ]]; then
-        compose down "${down_flags[@]}" || true
+    # ---------- Determine resources to delete (preview) ----------
+    # Volumes (named)
+    local -a VOLS_TO_REMOVE=()      # logical names from compose
+    local -a VOLS_EXISTING=()       # "logical|real" only if they currently exist
+    if $NUKE_ALL; then
+        VOLS_TO_REMOVE=("${DISCOVERED_VOLUMES[@]}")
     else
-        log WARN "docker-compose.yml not found at \$N8N_DIR; attempting plain 'docker compose down' in $PWD."
-        docker compose down "${down_flags[@]}" || true
+        local v
+        for v in "${DISCOVERED_VOLUMES[@]}"; do
+            [[ "$v" == "letsencrypt" ]] && continue
+            VOLS_TO_REMOVE+=("$v")
+        done
+    fi
+    # Map to real docker volume names and keep only those that exist
+    if ((${#VOLS_TO_REMOVE[@]})); then
+        local vname real
+        for vname in "${VOLS_TO_REMOVE[@]}"; do
+            real="$(resolve_volume_name "$vname" || expected_volume_name "$vname")"
+            if docker volume inspect "$real" >/dev/null 2>&1; then
+                VOLS_EXISTING+=("$vname|$real")
+            fi
+        done
     fi
 
-    log INFO "Removing related volumes..."
-    local vol
-    for vol in "${DISCOVERED_VOLUMES[@]}"; do
-        if [[ "$KEEP_CERTS" == "true" && "$vol" == "letsencrypt" ]]; then
-            log INFO "Skipping volume '$vol' (KEEP_CERTS=true)"
-            continue
+    # Networks
+    local -a NETS_TO_REMOVE=()
+    if ((${#DISCOVERED_NETWORKS[@]})); then
+        NETS_TO_REMOVE=("${DISCOVERED_NETWORKS[@]}")
+    else
+        local defnet
+        defnet="$(project_default_network_name)"
+        if [[ -n "$defnet" ]] && docker network inspect "$defnet" >/dev/null 2>&1; then
+            NETS_TO_REMOVE+=("$defnet")
         fi
-        if docker volume inspect "$vol" >/dev/null 2>&1; then
-            if docker volume rm "$vol" >/dev/null 2>&1; then
-                log INFO "Removed volume: $vol"
-            else
-                log WARN "Could not remove volume '$vol' (in use?)."
-            fi
-        else
-            log INFO "Volume '$vol' not found; skipping."
-        fi
-    done
+    fi
 
-    log INFO "Removing docker network (if exists): ${NETWORK_NAME}"
-    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    # Images (ALL only): n8n & postgres families; gather printable list + IDs
+    local -a IMAGES_TO_REMOVE=()
+    local -a IMAGE_IDS=()
+    if $NUKE_ALL; then
+        # Lines: "<repo:tag> <id>" — avoid grep failing with set -e by using awk
+        while read -r repotag imgid; do
+            [[ -z "$repotag" || -z "$imgid" ]] && continue
+            IMAGES_TO_REMOVE+=("${repotag} (${imgid})")
+            IMAGE_IDS+=("$imgid")
+        done < <(
+            docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+            | awk '/^(n8nio\/n8n|docker\.n8n\.io\/n8nio\/n8n|postgres):/ { print $0 }'
+        )
+    fi
+
+    # Directory contents to wipe (only ALL)
+    local -a DIR_ENTRIES=()
+    if $NUKE_ALL; then
+        shopt -s dotglob nullglob
+        local p
+        for p in "$N8N_DIR"/*; do
+            DIR_ENTRIES+=("$(basename "$p")")
+        done
+        shopt -u dotglob nullglob
+    fi
+
+    # ---------- Preview ----------
+    echo "════════════════ CLEANUP PREVIEW (mode: ${MODE^^}) ════════════════"
+    {
+        local IFS=' '
+        printf 'Will run: docker compose down %s\n\n' "${DOWN_FLAGS[*]}"
+    }
+    echo "Named volumes to be DELETED:"
+    if ((${#VOLS_EXISTING[@]})); then
+        local pair lv rv
+        for pair in "${VOLS_EXISTING[@]}"; do
+            IFS='|' read -r lv rv <<< "$pair"
+            echo "  - ${lv}  ->  ${rv}"
+        done
+    else
+        echo "  - <none>"
+    fi
+    echo
+
+    echo "Docker networks be DELETED:"
+    if ((${#NETS_TO_REMOVE[@]})); then
+        local n
+        for n in "${NETS_TO_REMOVE[@]}"; do
+            echo "  - ${n}"
+        done
+    else
+        echo "  - <none detected>"
+    fi
+    echo
+
+    echo "Dangling images to be PRUNED:"
+    echo "  - (dynamic: docker image prune -f)"
+    if $NUKE_ALL; then
+        echo
+        echo "Base images to DELETE:"
+        if ((${#IMAGES_TO_REMOVE[@]})); then
+            local i
+            for i in "${IMAGES_TO_REMOVE[@]}"; do
+                echo "  - ${i}"
+            done
+        else
+            echo "  - <none matched>"
+        fi
+        echo
+        echo "Target directory to be WIPED: $N8N_DIR"
+        if ((${#DIR_ENTRIES[@]})); then
+            echo "  Contents to be removed:"
+            local d
+            for d in "${DIR_ENTRIES[@]}"; do
+                echo "    - $d"
+            done
+        else
+            echo "  (directory is empty)"
+        fi
+        echo
+        echo "NOTE: letsencrypt volume WILL be removed (Let's Encrypt rate limits may apply)."
+    else
+        echo
+        echo "NOTES (SAFE):"
+        echo "  - Preserving 'letsencrypt' volume (keeps TLS certs)."
+        echo "  - No directory wipe."
+        echo "  - Base images are kept."
+    fi
+    echo "══════════════════════════════════════════════════════════════"
+
+    # ---------- Confirmation (ALL only) ----------
+    if $NUKE_ALL; then
+        local ans
+        read -r -p "Proceed with FULL cleanup (all)? (yes/no) [no]: " ans
+        case "${ans,,}" in
+            y|yes) ;;
+            *) log INFO "Cleanup (all) cancelled by user."; return 0 ;;
+        esac
+    fi
+
+    # ---------- Execute ----------
+    log INFO "Shutting down stack…"
+    if [[ -f "$N8N_DIR/docker-compose.yml" ]]; then
+        compose down "${DOWN_FLAGS[@]}" || true
+    else
+        log WARN "docker-compose.yml not found at \$N8N_DIR; attempting plain 'docker compose down' in $PWD."
+        docker compose down "${DOWN_FLAGS[@]}" || true
+    fi
+
+    if ((${#VOLS_EXISTING[@]})); then
+        log INFO "Removing named volumes…"
+        local pair lv rv
+        for pair in "${VOLS_EXISTING[@]}"; do
+            IFS='|' read -r lv rv <<< "$pair"
+            if docker volume inspect "$rv" >/dev/null 2>&1; then
+                if docker volume rm "$rv" >/dev/null 2>&1; then
+                    log INFO "Removed volume: $lv ($rv)"
+                else
+                    log WARN "Could not remove volume '$lv' ($rv) — maybe still in use?"
+                fi
+            else
+                log INFO "Already gone: $lv ($rv) (removed by compose)"
+            fi
+        done
+    fi
+
+    log INFO "Removing docker networks…"
+    remove_compose_networks
+
+    if $NUKE_ALL; then
+        purge_project_volumes_by_label
+        purge_project_networks_by_label
+    fi
 
     log INFO "Pruning dangling images…"
     docker image prune -f >/dev/null 2>&1 || true
-    if [[ "$REMOVE_IMAGES" == "true" ]]; then
-        log WARN "Removing base images: n8nio/n8n and postgres (explicit request)"
-        docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-          | grep -E '^(n8nio/n8n|docker\.n8n\.io/n8nio/n8n|postgres):' \
-          | awk '{print $2}' \
-          | xargs -r docker rmi -f || true
+    if $NUKE_ALL && ((${#IMAGE_IDS[@]})); then
+        log WARN "Removing base images…"
+        docker rmi -f "${IMAGE_IDS[@]}" >/dev/null 2>&1 || true
     fi
 
-    log INFO "Cleanup completed."
-    [[ "$KEEP_CERTS" == "true" ]] && log INFO "Note: kept 'letsencrypt' volume (certs preserved). Set KEEP_CERTS=false to reset TLS."
+    if $NUKE_ALL; then
+        safe_wipe_target_dir
+    fi
+
+    log INFO "Cleanup completed (mode=${MODE^^})."
+    if [[ "$MODE" == "safe" ]]; then
+        log INFO "Preserved 'letsencrypt' volume. Use '--cleanup all' to remove everything."
+    fi
 }
 
 ################################################################################
 # parse_args()
 # Description:
 #   Parse CLI arguments and set global flags/vars.
-#
-# Behaviors:
-#   - Enforces single action selection.
-#   - Uses distinct flags for SSL email vs. notification email.
-#
-# Returns:
-#   0 on success; exits 1 on invalid usage.
+#   - Enforces exactly one primary action.
 ################################################################################
 parse_args() {
-    # Define short/long specs
-    SHORT="i:u:v:m:cbad:l:r:e:ns:fh"
-    LONG="install:,upgrade:,version:,ssl-email:,cleanup,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:"
+    # NOTE: keep short/long specs in sync with usage()
+    SHORT="i:uv:m:c:bad:l:r:e:ns:fh"
+    LONG="install:,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
 
-    # Parse
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
 
@@ -1631,8 +1454,7 @@ parse_args() {
                 ;;
             -u|--upgrade)
                 DO_UPGRADE=true
-                DOMAIN="$(parse_domain_arg "$2")"
-                shift 2
+                shift
                 ;;
             -v|--version)
                 N8N_VERSION="$2"
@@ -1644,7 +1466,8 @@ parse_args() {
                 ;;
             -c|--cleanup)
                 DO_CLEANUP=true
-                shift
+                CLEANUP_MODE="$2"
+                shift 2
                 ;;
             -b|--backup)
                 DO_BACKUP=true
@@ -1668,7 +1491,8 @@ parse_args() {
                 shift 2
                 ;;
             -e|--email-to)
-                EMAIL_TO="$2"; EMAIL_EXPLICIT=true
+                EMAIL_TO="$2"
+                EMAIL_EXPLICIT=true
                 shift 2
                 ;;
             -n|--notify-on-success)
@@ -1681,6 +1505,34 @@ parse_args() {
                 ;;
             --mode)
                 INSTALL_MODE="$2"
+                shift 2
+                ;;
+            --monitoring)
+                MONITORING=true
+                shift
+                ;;
+            --expose-prometheus)
+                EXPOSE_PROMETHEUS=true
+                shift
+                ;;
+            --subdomain-n8n)
+                SUBDOMAIN_N8N="$2"
+                shift 2
+                ;;
+            --subdomain-grafana)
+                SUBDOMAIN_GRAFANA="$2"
+                shift 2
+                ;;
+            --subdomain-prometheus)
+                SUBDOMAIN_PROMETHEUS="$2"
+                shift 2
+                ;;
+            --basic-auth-user)
+                BASIC_AUTH_USER="$2"
+                shift 2
+                ;;
+            --basic-auth-pass)
+                BASIC_AUTH_PASS="$2"
                 shift 2
                 ;;
             -f|--force)
@@ -1700,7 +1552,7 @@ parse_args() {
         esac
     done
 
-    # Enforce single action
+    # Enforce exactly one primary action
     local count=0
     $DO_INSTALL   && ((count+=1))
     $DO_UPGRADE   && ((count+=1))
@@ -1708,13 +1560,23 @@ parse_args() {
     $DO_RESTORE   && ((count+=1))
     $DO_CLEANUP   && ((count+=1))
     $DO_AVAILABLE && ((count+=1))
-    (( count == 1 )) || { log ERROR "Choose exactly one action."; usage; }
+    if (( count != 1 )); then
+        log ERROR "Choose exactly one action."
+        usage
+    fi
 
-    # Normalize mode default for install
+    # Validate install mode if used
     if $DO_INSTALL; then
-        case "$INSTALL_MODE" in
+        case "${INSTALL_MODE}" in
             single|queue) ;;
-            *) log ERROR "Invalid --mode '$INSTALL_MODE' (use single|queue)"; exit 2 ;;
+            *) log ERROR "Invalid --mode '${INSTALL_MODE}' (use single|queue)"; exit 2 ;;
+        esac
+    fi
+
+    if $DO_CLEANUP; then
+        case "${CLEANUP_MODE}" in
+            safe|all) ;;
+            *) log ERROR "cleanup expects with option 'safe' or 'all'"; exit 2 ;;
         esac
     fi
 }
@@ -1745,13 +1607,13 @@ main() {
     if $DO_INSTALL; then
         install_stack
     elif $DO_UPGRADE; then
-        install_prereqs
+        ensure_prereqs
         upgrade_stack
     elif $DO_BACKUP; then
-        install_prereqs
+        ensure_prereqs
         backup_stack
     elif $DO_RESTORE; then
-        install_prereqs
+        ensure_prereqs
         restore_stack
     elif $DO_CLEANUP; then
         cleanup_stack

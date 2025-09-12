@@ -1,0 +1,52 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    stack: n8n
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['prometheus:9090']
+        labels:
+          instance: prometheus
+
+  - job_name: traefik
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['traefik:8081']
+        labels:
+          instance: traefik
+
+  - job_name: n8n
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['main:5678']
+        labels:
+          instance: n8n-main
+
+  - job_name: postgres_exporter
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          instance: postgres
+
+  - job_name: redis_exporter
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          instance: redis
+
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          instance: cadvisor
+
+  - job_name: node_exporter
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          instance: node
