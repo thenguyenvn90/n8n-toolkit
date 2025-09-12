@@ -1245,6 +1245,7 @@ cleanup_stack() {
     $NUKE_ALL && DOWN_FLAGS+=(-v)   # in ALL, also remove anonymous volumes
 
     # ---------- Determine resources to delete (preview) ----------
+
     # Volumes (named)
     local -a VOLS_TO_REMOVE=()      # logical names from compose
     local -a VOLS_EXISTING=()       # "logical|real" only if they currently exist
@@ -1280,19 +1281,65 @@ cleanup_stack() {
         fi
     fi
 
-    # Images (ALL only): n8n & postgres families; gather printable list + IDs
-    local -a IMAGES_TO_REMOVE=()
-    local -a IMAGE_IDS=()
+    # Images (ALL only): remove every image defined in docker-compose.yml (resolved by compose config)
+    local -a IMAGES_TO_REMOVE=()   # pretty list for preview: "<repo[:tag|@digest]> (<id>|not present locally)"
+    local -a IMAGE_IDS=()          # bare IDs to rmi -f
     if $NUKE_ALL; then
-        # Lines: "<repo:tag> <id>" — avoid grep failing with set -e by using awk
-        while read -r repotag imgid; do
-            [[ -z "$repotag" || -z "$imgid" ]] && continue
-            IMAGES_TO_REMOVE+=("${repotag} (${imgid})")
-            IMAGE_IDS+=("$imgid")
-        done < <(
-            docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-            | awk '/^(n8nio\/n8n|docker\.n8n\.io\/n8nio\/n8n|postgres):/ { print $0 }'
-        )
+        local json
+        if json="$(compose config --format json 2>/dev/null)"; then
+            # 1) Collect images referenced by services (already env-resolved)
+            local -a compose_images=()
+            mapfile -t compose_images < <(
+                printf '%s' "$json" | jq -r '.services[]?.image? // empty' | awk 'NF' | sort -u
+            )
+
+            # 2) Build maps of local images by "<repo:tag>" and "<repo@digest>" -> ID
+            declare -A map_tag_to_id=()
+            declare -A map_digest_to_id=()
+
+            # repo:tag map
+            while IFS= read -r line; do
+                # "<repo>:<tag> <id>"
+                local key="${line% *}"
+                local val="${line##* }"
+                [[ -n "$key" && -n "$val" ]] && map_tag_to_id["$key"]="$val"
+            done < <(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' 2>/dev/null || true)
+
+            # repo@digest map
+            while IFS= read -r line; do
+                # "<repo>@<digest> <id>"
+                local key="${line% *}"
+                local val="${line##* }"
+                # Skip entries where the digest part is literally "<none>"
+                if [[ "${key#*@}" == "<none>" ]]; then
+                    continue
+                fi
+                [[ -n "$key" && -n "$val" ]] && map_digest_to_id["$key"]="$val"
+            done < <(docker images --digests --format '{{.Repository}}@{{.Digest}} {{.ID}}' 2>/dev/null || true)
+
+            # 3) Resolve each compose image to an ID if present locally
+            local img id
+            for img in "${compose_images[@]}"; do
+                if [[ "$img" == *"@"* ]]; then
+                    id="${map_digest_to_id[$img]:-}"
+                else
+                    id="${map_tag_to_id[$img]:-}"
+                fi
+                if [[ -n "$id" ]]; then
+                    IMAGES_TO_REMOVE+=("${img} (${id})")
+                    IMAGE_IDS+=("$id")
+                else
+                    IMAGES_TO_REMOVE+=("${img} (not present locally)")
+                fi
+            done
+
+            # 4) De-dupe IDs
+            if ((${#IMAGE_IDS[@]})); then
+                mapfile -t IMAGE_IDS < <(printf '%s\n' "${IMAGE_IDS[@]}" | awk 'NF' | sort -u)
+            fi
+        else
+            log WARN "Could not parse 'compose config' JSON; skipping compose-defined image list."
+        fi
     fi
 
     # Directory contents to wipe (only ALL)
@@ -1324,7 +1371,7 @@ cleanup_stack() {
     fi
     echo
 
-    echo "Docker networks be DELETED:"
+    echo "Docker networks to be DELETED:"
     if ((${#NETS_TO_REMOVE[@]})); then
         local n
         for n in "${NETS_TO_REMOVE[@]}"; do
@@ -1337,16 +1384,17 @@ cleanup_stack() {
 
     echo "Dangling images to be PRUNED:"
     echo "  - (dynamic: docker image prune -f)"
+
     if $NUKE_ALL; then
         echo
-        echo "Base images to DELETE:"
+        echo "Compose-defined images to DELETE:"
         if ((${#IMAGES_TO_REMOVE[@]})); then
             local i
             for i in "${IMAGES_TO_REMOVE[@]}"; do
                 echo "  - ${i}"
             done
         else
-            echo "  - <none matched>"
+            echo "  - <none discovered>"
         fi
         echo
         echo "Target directory to be WIPED: $N8N_DIR"
@@ -1408,7 +1456,6 @@ cleanup_stack() {
 
     log INFO "Removing docker networks…"
     remove_compose_networks
-
     if $NUKE_ALL; then
         purge_project_volumes_by_label
         purge_project_networks_by_label
@@ -1417,7 +1464,7 @@ cleanup_stack() {
     log INFO "Pruning dangling images…"
     docker image prune -f >/dev/null 2>&1 || true
     if $NUKE_ALL && ((${#IMAGE_IDS[@]})); then
-        log WARN "Removing base images…"
+        log WARN "Removing compose-defined images…"
         docker rmi -f "${IMAGE_IDS[@]}" >/dev/null 2>&1 || true
     fi
 
