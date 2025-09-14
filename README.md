@@ -4,9 +4,10 @@
 
 > Production-ready for Docker, with HTTPS (Traefik), PostgreSQL, Redis (Queue Mode), and a plug-and-play Prometheus & Grafana observability stack.
 
-Related Repos:
-https://github.com/thenguyenvn90/n8n-queue-mode
-https://github.com/thenguyenvn90/n8n-observability
+**Related Repos:**
+
+- https://github.com/thenguyenvn90/n8n-queue-mode
+- https://github.com/thenguyenvn90/n8n-observability
 ---
 
 ## Table of Contents
