@@ -309,6 +309,7 @@ copy_templates_for_mode() {
     # Rotate SECRETS in env if missing/default
     rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
     rotate_or_generate_secret "$ENV_FILE" N8N_BASIC_AUTH_PASSWORD  16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_RUNNERS_AUTH_TOKEN   16 "CHANGE_ME_BASE64_16_BYTES"
     rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
 
     # Queue mode only
@@ -1102,6 +1103,13 @@ restore_stack() {
     log INFO "Volume $vol restored"
     done
 
+    # Fix ownership for n8n data after restore (UID 1000 = node)
+    if docker volume inspect "$(expected_volume_name n8n-data)" >/dev/null 2>&1; then
+        log INFO "Fixing ownership on n8n-data volume (UID 1000)"
+        docker run --rm -v "$(expected_volume_name n8n-data):/data" alpine \
+          sh -c 'chown -R 1000:1000 /data || true'
+    fi
+
     log INFO "Start working on $N8N_DIR ..."
     cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
 
@@ -1408,7 +1416,8 @@ cleanup_stack() {
             echo "  (directory is empty)"
         fi
         echo
-        echo "NOTE: letsencrypt volume WILL be removed (Let's Encrypt rate limits may apply)."
+        echo "NOTE: 'letsencrypt' volume WILL be removed."
+        echo "      WARNING: You may hit Let's Encrypt rate limits on next start."
     else
         echo
         echo "NOTES (SAFE):"

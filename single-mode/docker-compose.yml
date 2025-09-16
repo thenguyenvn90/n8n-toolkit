@@ -48,7 +48,7 @@ services:
       retries: 5
 
   postgres:
-    image: postgres:14
+    image: postgres:15
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -58,7 +58,7 @@ services:
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       start_period: 20s
@@ -72,6 +72,7 @@ services:
     environment:
       - TZ=${GENERIC_TIMEZONE}
       - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_DEFAULT_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -117,7 +118,7 @@ services:
   # ===== Monitoring (enabled by COMPOSE_PROFILES=monitoring) =====
   prometheus:
     profiles: ["monitoring"]
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     restart: unless-stopped
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -140,7 +141,7 @@ services:
 
   grafana:
     profiles: ["monitoring"]
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.0
     restart: unless-stopped
     environment:
       - TZ=${GENERIC_TIMEZONE}

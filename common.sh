@@ -1513,6 +1513,24 @@ post_up_tls_checks() {
     return 0
 }
 
+################################################################################
+# detect_mode_from_env_pre_up()
+# Description:
+#   Best-effort: read EXECUTIONS_MODE from ENV_FILE before containers are up.
+#   Sets global DISCOVERED_MODE to 'queue' if EXECUTIONS_MODE=queue, else 'single'.
+#   No error if ENV_FILE missing.
+################################################################################
+detect_mode_from_env_pre_up() {
+    local exec_mode=""
+    [[ -f "${ENV_FILE:-}" ]] && exec_mode="$(read_env_var "$ENV_FILE" EXECUTIONS_MODE || true)"
+    exec_mode="${exec_mode,,}"
+    if [[ "$exec_mode" == "queue" ]]; then
+        DISCOVERED_MODE="queue"
+    else
+        DISCOVERED_MODE="single"
+    fi
+    log INFO "Pre-up inferred mode from .env: ${DISCOVERED_MODE}"
+}
 
 ################################################################################
 # _read_env_var_from_container()
@@ -1591,7 +1609,9 @@ docker_up_check() {
     log INFO "Starting Docker Compose…"
     compose pull -q || true
     local up_args=(-d)
-    if [[ "${DISCOVERED_MODE:-unknown}" == "queue" ]]; then
+    # If mode wasn't set by the caller (e.g., install path), infer from .env
+    [[ "${DISCOVERED_MODE:-unknown}" == "unknown" ]] && detect_mode_from_env_pre_up || true
+    if [[ "${DISCOVERED_MODE:-single}" == "queue" ]]; then
         local replicas="${N8N_WORKER_SCALE:-1}"
         if printf '%s\n' "${DISCOVERED_SERVICES[@]}" | grep -qx "worker"; then
             up_args+=( --scale "worker=${replicas}" )
@@ -1603,7 +1623,6 @@ docker_up_check() {
     detect_mode_runtime || true
     wait_for_containers_healthy || return 1
 }
-
 
 ################################################################################
 # strict_env_check()
