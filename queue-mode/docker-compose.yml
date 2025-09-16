@@ -93,6 +93,7 @@ services:
       - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
+      - ./local-files:/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,6 +141,9 @@ services:
       - TZ=${GENERIC_TIMEZONE}
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./local-files:/files
     depends_on:
       main:
         condition: service_started
@@ -158,6 +162,7 @@ services:
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
+      - ./local-files:/files
     depends_on:
       postgres:
         condition: service_healthy
