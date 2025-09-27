@@ -8,6 +8,7 @@
 
 - https://github.com/thenguyenvn90/n8n-queue-mode
 - https://github.com/thenguyenvn90/n8n-observability
+- https://nextgrowth.ai/
 ---
 
 ## Table of Contents
