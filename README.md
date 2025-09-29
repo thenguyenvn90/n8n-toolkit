@@ -4,6 +4,7 @@
 
 > Production-ready for Docker, with HTTPS (Traefik), PostgreSQL, Redis (Queue Mode), and a plug-and-play Prometheus & Grafana observability stack.
 
+Detail guide: https://nextgrowth.ai/self-host-n8n-automation-ubuntu-docker/
 ---
 
 ## Table of Contents
