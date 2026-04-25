@@ -158,6 +158,15 @@ wizard_check_prereqs() {
 wizard_install() {
     local wizard_mode=false   # true if we prompted for domain interactively
 
+    # Require interactive terminal when values are missing
+    if [[ -z "${DOMAIN:-}" || -z "${SSL_EMAIL:-}" ]] && [[ ! -t 0 ]]; then
+        log ERROR "wizard_install requires an interactive terminal. Set --install <domain> -m <email> for non-interactive use."
+        exit 2
+    fi
+
+    # Always validate prerequisites first
+    wizard_check_prereqs
+
     # 1. Domain
     if [[ -z "${DOMAIN:-}" ]]; then
         wizard_mode=true
@@ -183,7 +192,7 @@ wizard_install() {
         while true; do
             read -r -p "  Enter SSL/admin email: " _input
             _input="${_input// /}"
-            if [[ "$_input" == *@*.* ]]; then
+            if [[ "$_input" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                 SSL_EMAIL="$_input"
                 break
             else
@@ -214,9 +223,6 @@ wizard_install() {
         esac
         echo ""
     fi
-
-    # 5. Always: prerequisite validation
-    wizard_check_prereqs
 }
 
 ################################################################################
