@@ -48,7 +48,7 @@ services:
       retries: 5
 
   postgres:
-    image: postgres:15
+    image: postgres:15.7
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -91,7 +91,7 @@ services:
       - N8N_METRICS=true
       - N8N_METRICS_INCLUDE_DEFAULT_METRICS=true
       - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
-      - N8N_RUNNERS_ENABLED=false
+      - N8N_RUNNERS_ENABLED=false  # overrides .env — main orchestrates only, workers execute
       - N8N_RESTRICT_FILE_ACCESS_TO=/files
     volumes:
       - n8n-data:/home/node/.n8n
@@ -155,6 +155,12 @@ services:
         condition: service_healthy
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:${N8N_PORT:-5678}/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
 
   # ===== Monitoring (profile) =====
   prometheus:
@@ -169,6 +175,12 @@ services:
       - prometheus-data:/prometheus
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
     labels:
       - "traefik.enable=${EXPOSE_PROMETHEUS:-false}"
       - "traefik.docker.network=n8n-network"
@@ -219,11 +231,13 @@ services:
       - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
       - "traefik.http.middlewares.secure-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true"
-    depends_on: [prometheus]
+    depends_on:
+      prometheus:
+        condition: service_healthy
 
   postgres-exporter:
     profiles: ["monitoring"]
-    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
     restart: unless-stopped
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
@@ -235,7 +249,7 @@ services:
 
   redis-exporter:
     profiles: ["monitoring"]
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter:v1.62.0
     restart: unless-stopped
     command:
       - "--redis.addr=redis:6379"
@@ -248,7 +262,7 @@ services:
 
   cadvisor:
     profiles: ["monitoring"]
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped
     privileged: true
     volumes:
@@ -257,11 +271,10 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
-    security_opt: [no-new-privileges:true]
 
   node-exporter:
     profiles: ["monitoring"]
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
     restart: unless-stopped
     pid: "host"
     networks: [n8n-network]
