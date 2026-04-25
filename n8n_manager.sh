@@ -270,8 +270,8 @@ set_paths() {
 ################################################################################
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
-    SHORT="i:uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install:,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
+    SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -280,7 +280,9 @@ parse_args() {
         case "$1" in
             -i|--install)
                 DO_INSTALL=true
-                DOMAIN="$(parse_domain_arg "$2")"
+                if [[ -n "${2:-}" ]]; then
+                    DOMAIN="$(parse_domain_arg "$2")"
+                fi
                 shift 2
                 ;;
             -u|--upgrade)
@@ -436,6 +438,7 @@ main() {
     fi
 
     if $DO_INSTALL; then
+        wizard_install
         install_stack
     elif $DO_UPGRADE; then
         ensure_prereqs

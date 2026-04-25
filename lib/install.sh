@@ -121,6 +121,105 @@ copy_templates_for_mode() {
 }
 
 ################################################################################
+# wizard_check_prereqs()
+# Description:
+#   Validate system prerequisites before install. Always runs (wizard or CLI).
+#   Emits WARN (non-fatal) for RAM below threshold and Docker < 24.
+#
+# Returns:
+#   0 always (warnings only, never exits).
+################################################################################
+wizard_check_prereqs() {
+    local mem_kb
+    mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+    local min_kb
+    [[ "$INSTALL_MODE" == "queue" ]] && min_kb=$((2*1024*1024)) || min_kb=$((1*1024*1024))
+    if (( mem_kb > 0 && mem_kb < min_kb )); then
+        local min_gb; min_gb=$(( min_kb / 1024 / 1024 ))
+        log WARN "Available RAM ($((mem_kb/1024))MB) is below the recommended ${min_gb}GB for ${INSTALL_MODE} mode. Proceeding anyway."
+    fi
+    # Docker version check (requires Docker 24+)
+    if command -v docker &>/dev/null; then
+        local docker_ver
+        docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1 || echo 0)
+        if (( docker_ver > 0 && docker_ver < 24 )); then
+            log WARN "Docker version $docker_ver detected. n8n 2.x recommends Docker 24+. Proceeding anyway."
+        fi
+    fi
+}
+
+################################################################################
+# wizard_install()
+# Description:
+#   Interactive setup wizard. Prompts for any globals not supplied via CLI.
+#   Silent (no prompts) when all required values already set.
+#   Must be called before install_stack().
+################################################################################
+wizard_install() {
+    local wizard_mode=false   # true if we prompted for domain interactively
+
+    # 1. Domain
+    if [[ -z "${DOMAIN:-}" ]]; then
+        wizard_mode=true
+        echo ""
+        echo "┌─────────────────────────────────────────────────────┐"
+        echo "│  n8n Setup Wizard                                   │"
+        echo "└─────────────────────────────────────────────────────┘"
+        while true; do
+            read -r -p "  Enter base domain (e.g., example.com): " _input
+            _input="${_input// /}"   # strip spaces
+            [[ -z "$_input" ]] && { echo "  Domain cannot be empty."; continue; }
+            if DOMAIN="$(parse_domain_arg "$_input" 2>/dev/null)"; then
+                break
+            else
+                echo "  Invalid domain. Use a plain hostname like: example.com"
+            fi
+        done
+    fi
+
+    # 2. Email
+    if [[ -z "${SSL_EMAIL:-}" ]]; then
+        wizard_mode=true
+        while true; do
+            read -r -p "  Enter SSL/admin email: " _input
+            _input="${_input// /}"
+            if [[ "$_input" == *@*.* ]]; then
+                SSL_EMAIL="$_input"
+                break
+            else
+                echo "  Please enter a valid email address."
+            fi
+        done
+    fi
+
+    # 3. Mode — only if wizard_mode (don't override explicit --mode flag)
+    if $wizard_mode && [[ "$INSTALL_MODE" == "single" ]]; then
+        echo ""
+        echo "  Select deployment mode:"
+        echo "    1) single  — one container, up to ~50 workflows (default)"
+        echo "    2) queue   — workers + Redis, handles high concurrency"
+        read -r -p "  Choice [1]: " _input
+        case "${_input:-1}" in
+            2|queue) INSTALL_MODE="queue" ;;
+            *)       INSTALL_MODE="single" ;;
+        esac
+    fi
+
+    # 4. Monitoring — only if wizard_mode
+    if $wizard_mode && ! $MONITORING; then
+        echo ""
+        read -r -p "  Enable monitoring stack? (Prometheus + Grafana) [y/N]: " _input
+        case "${_input,,}" in
+            y|yes) MONITORING=true ;;
+        esac
+        echo ""
+    fi
+
+    # 5. Always: prerequisite validation
+    wizard_check_prereqs
+}
+
+################################################################################
 # install_stack()
 # Description:
 #   Orchestrate a fresh installation of the n8n stack behind Traefik/LE.
