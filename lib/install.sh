@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# lib/install.sh — Install stack functions
+# Sourced by n8n_manager.sh — do not execute directly.
+# shellcheck disable=SC2154  # Variables set by n8n_manager.sh globals
+
+################################################################################
+# copy_templates_for_mode()
+# Description:
+#   Copy docker-compose.yml and .env from the selected template (single|queue).
+#
+# Behaviors:
+#   - Backs up existing files with timestamp.
+#   - Updates DOMAIN, SSL_EMAIL, N8N_IMAGE_TAG in .env.
+#   - Generates STRONG_PASSWORD and N8N_ENCRYPTION_KEY if placeholders found.
+#
+# Returns:
+#   0 on success; exits non-zero on missing templates.
+################################################################################
+copy_templates_for_mode() {
+    local src_dir=""
+    case "$INSTALL_MODE" in
+        single) src_dir="$TEMPLATE_SINGLE" ;;
+        queue)  src_dir="$TEMPLATE_QUEUE"  ;;
+        *) log ERROR "--mode must be 'single' or 'queue'"; exit 2 ;;
+    esac
+
+    if [[ ! -f "$src_dir/docker-compose.yml" ]]; then
+        log ERROR "docker-compose.yml not found at $src_dir"
+        exit 1
+    fi
+
+    if [[ ! -f "$src_dir/.env" ]]; then
+        log ERROR ".env file not found at $src_dir"
+        exit 1
+    fi
+
+    for f in docker-compose.yml .env; do
+        [[ -f "$N8N_DIR/$f" ]] && cp -a "$N8N_DIR/$f" "$N8N_DIR/${f}.bak.$(date +%F_%H-%M-%S)"
+        cp -a "$src_dir/$f" "$N8N_DIR/$f"
+    done
+
+    # Update .env
+    log INFO "Updating DOMAIN=$DOMAIN in $ENV_FILE"
+    upsert_env_var "DOMAIN" "$DOMAIN" "$ENV_FILE"
+
+    log INFO "Updating SSL_EMAIL=$SSL_EMAIL in $ENV_FILE"
+    [[ -n "${SSL_EMAIL:-}" ]] && upsert_env_var "SSL_EMAIL" "$SSL_EMAIL" "$ENV_FILE"
+
+    # Resolve target version: explicit -v wins; else latest stable
+    local target_version
+    target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1
+    log INFO "Updating N8N_IMAGE_TAG=$target_version in $ENV_FILE"
+    upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
+
+    # Rotate SECRETS in env if missing/default
+    rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_BASIC_AUTH_PASSWORD  16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_RUNNERS_AUTH_TOKEN   16 "CHANGE_ME_BASE64_16_BYTES"
+    rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
+
+    # Queue mode only
+    if [[ "${INSTALL_MODE:-single}" == "queue" ]]; then
+        rotate_or_generate_secret "$ENV_FILE" REDIS_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
+    fi
+
+    # Subdomains & monitoring flags persisted in .env
+    [[ -n "$SUBDOMAIN_N8N" ]]        && upsert_env_var "SUBDOMAIN_N8N" "$SUBDOMAIN_N8N" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_GRAFANA" ]]    && upsert_env_var "SUBDOMAIN_GRAFANA" "$SUBDOMAIN_GRAFANA" "$ENV_FILE"
+    [[ -n "$SUBDOMAIN_PROMETHEUS" ]] && upsert_env_var "SUBDOMAIN_PROMETHEUS" "$SUBDOMAIN_PROMETHEUS" "$ENV_FILE"
+
+    if $MONITORING; then
+        upsert_env_var "COMPOSE_PROFILES" "monitoring" "$ENV_FILE"
+        local mon_src="$SCRIPT_DIR/deploy/monitoring"
+        local mon_dst="$N8N_DIR/monitoring"
+        if [[ -d "$mon_src" ]]; then
+            mkdir -p "$mon_dst"
+            cp -a "$mon_src/." "$mon_dst/"
+            log INFO "Copied monitoring assets into $mon_dst"
+            if [[ ! -f "$mon_dst/prometheus.yml" ]]; then
+                log ERROR "Expected file not found: $mon_dst/prometheus.yml (is it missing or a directory?)"
+                exit 1
+            fi
+        else
+            log WARN "Monitoring enabled but $mon_src not found; Prometheus/Grafana may fail to start."
+        fi
+    else
+        upsert_env_var "COMPOSE_PROFILES" "" "$ENV_FILE"
+    fi
+
+    # Ensure Traefik basic auth variables are consistent (always run)
+    ensure_monitoring_auth
+
+    if $EXPOSE_PROMETHEUS; then
+        upsert_env_var "EXPOSE_PROMETHEUS" "true" "$ENV_FILE"
+    else
+        upsert_env_var "EXPOSE_PROMETHEUS" "false" "$ENV_FILE"
+    fi
+
+    # persist explicit FQDNs
+    local base_dom sub_n8n sub_graf sub_prom
+    base_dom="$(read_env_var "$ENV_FILE" DOMAIN)"
+    sub_n8n="$(read_env_var "$ENV_FILE" SUBDOMAIN_N8N)"
+    sub_graf="$(read_env_var "$ENV_FILE" SUBDOMAIN_GRAFANA)"
+    sub_prom="$(read_env_var "$ENV_FILE" SUBDOMAIN_PROMETHEUS)"
+
+    sub_n8n="${sub_n8n:-n8n}"
+    sub_graf="${sub_graf:-grafana}"
+    sub_prom="${sub_prom:-prometheus}"
+
+    N8N_FQDN="${sub_n8n:+$sub_n8n.}${base_dom}"
+    GRAFANA_FQDN="${sub_graf:+$sub_graf.}${base_dom}"
+    PROMETHEUS_FQDN="${sub_prom:+$sub_prom.}${base_dom}"
+
+    upsert_env_var "N8N_FQDN" "$N8N_FQDN" "$ENV_FILE"
+    upsert_env_var "GRAFANA_FQDN" "$GRAFANA_FQDN" "$ENV_FILE"
+    upsert_env_var "PROMETHEUS_FQDN" "$PROMETHEUS_FQDN" "$ENV_FILE"
+
+    # Secure secrets file
+    chmod 600 "$ENV_FILE" || true
+    chmod 640 "$COMPOSE_FILE" || true
+}
+
+################################################################################
+# wizard_check_prereqs()
+# Description:
+#   Validate system prerequisites before install. Always runs (wizard or CLI).
+#   Emits WARN (non-fatal) for RAM below threshold and Docker < 24.
+#
+# Returns:
+#   0 always (warnings only, never exits).
+################################################################################
+wizard_check_prereqs() {
+    local mem_kb
+    mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+    local min_kb
+    [[ "$INSTALL_MODE" == "queue" ]] && min_kb=$((2*1024*1024)) || min_kb=$((1*1024*1024))
+    if (( mem_kb > 0 && mem_kb < min_kb )); then
+        local min_gb; min_gb=$(( min_kb / 1024 / 1024 ))
+        log WARN "Available RAM ($((mem_kb/1024))MB) is below the recommended ${min_gb}GB for ${INSTALL_MODE} mode. Proceeding anyway."
+    fi
+    # Docker version check (requires Docker 24+)
+    if command -v docker &>/dev/null; then
+        local docker_ver
+        docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1 || echo 0)
+        if (( docker_ver > 0 && docker_ver < 24 )); then
+            log WARN "Docker version $docker_ver detected. n8n 2.x recommends Docker 24+. Proceeding anyway."
+        fi
+    fi
+}
+
+################################################################################
+# wizard_install()
+# Description:
+#   Interactive setup wizard. Prompts for any globals not supplied via CLI.
+#   Silent (no prompts) when all required values already set.
+#   Must be called before install_stack().
+################################################################################
+wizard_install() {
+    local wizard_mode=false   # true if we prompted for domain interactively
+
+    # Require interactive terminal when values are missing
+    if [[ -z "${DOMAIN:-}" || -z "${SSL_EMAIL:-}" ]] && [[ ! -t 0 ]]; then
+        log ERROR "wizard_install requires an interactive terminal. Set --install <domain> -m <email> for non-interactive use."
+        exit 2
+    fi
+
+    # Always validate prerequisites first
+    wizard_check_prereqs
+
+    # 1. Domain
+    if [[ -z "${DOMAIN:-}" ]]; then
+        wizard_mode=true
+        echo ""
+        echo "┌─────────────────────────────────────────────────────┐"
+        echo "│  n8n Setup Wizard                                   │"
+        echo "└─────────────────────────────────────────────────────┘"
+        while true; do
+            read -r -p "  Enter base domain (e.g., example.com): " _input
+            _input="${_input// /}"   # strip spaces
+            [[ -z "$_input" ]] && { echo "  Domain cannot be empty."; continue; }
+            if DOMAIN="$(parse_domain_arg "$_input" 2>/dev/null)"; then
+                break
+            else
+                echo "  Invalid domain. Use a plain hostname like: example.com"
+            fi
+        done
+    fi
+
+    # 2. Email
+    if [[ -z "${SSL_EMAIL:-}" ]]; then
+        wizard_mode=true
+        while true; do
+            read -r -p "  Enter SSL/admin email: " _input
+            _input="${_input// /}"
+            if [[ "$_input" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+                SSL_EMAIL="$_input"
+                break
+            else
+                echo "  Please enter a valid email address."
+            fi
+        done
+    fi
+
+    # 3. Mode — only if wizard_mode (don't override explicit --mode flag)
+    if $wizard_mode && [[ "$INSTALL_MODE" == "single" ]]; then
+        echo ""
+        echo "  Select deployment mode:"
+        echo "    1) single  — one container, up to ~50 workflows (default)"
+        echo "    2) queue   — workers + Redis, handles high concurrency"
+        read -r -p "  Choice [1]: " _input
+        case "${_input:-1}" in
+            2|queue) INSTALL_MODE="queue" ;;
+            *)       INSTALL_MODE="single" ;;
+        esac
+    fi
+
+    # 4. Monitoring — only if wizard_mode
+    if $wizard_mode && ! $MONITORING; then
+        echo ""
+        read -r -p "  Enable monitoring stack? (Prometheus + Grafana) [y/N]: " _input
+        case "${_input,,}" in
+            y|yes) MONITORING=true ;;
+        esac
+        echo ""
+    fi
+}
+
+################################################################################
+# install_stack()
+# Description:
+#   Orchestrate a fresh installation of the n8n stack behind Traefik/LE.
+#
+# Behaviors:
+#   - --mode is optional; defaults to 'single'.
+#   - Prompts for SSL_EMAIL if missing.
+#   - Verifies DOMAIN DNS points to this host (check_domain()).
+#   - Installs Docker/Compose and dependencies (ensure_prereqs()).
+#   - Prepares compose + .env with pinned version and secrets (copy_templates_for_mode()).
+#   - Validates compose/env (validate_compose_and_env()).
+#   - Creates volumes as needed and starts stack (docker_up_check()).
+#   - Waits for containers and TLS to be healthy.
+#   - Prints a summary on success.
+#
+# Returns:
+#   0 on success; exits non-zero if any step fails.
+################################################################################
+install_stack() {
+    [[ -n "$DOMAIN" ]] || { log ERROR "Install requires a base domain."; exit 2; }
+
+    log INFO "Starting N8N installation for base domain: $DOMAIN"
+    ensure_prereqs
+    copy_templates_for_mode
+    load_env_file
+    preflight_dns_checks
+    validate_compose_and_env
+    discover_from_compose
+    ensure_external_volumes
+    [[ "$INSTALL_MODE" == "queue" ]] && DISCOVERED_MODE="queue"
+
+    docker_up_check || { log ERROR "Stack unhealthy after install."; exit 1; }
+    post_up_tls_checks || true
+
+    # Summary
+    local graf_fqdn prom_fqdn expose_prom compose_profiles
+    graf_fqdn="$(read_env_var "$ENV_FILE" GRAFANA_FQDN || true)"
+    prom_fqdn="$(read_env_var "$ENV_FILE" PROMETHEUS_FQDN || true)"
+    expose_prom="$(read_env_var "$ENV_FILE" EXPOSE_PROMETHEUS || echo false)"
+    compose_profiles="$(read_env_var "$ENV_FILE" COMPOSE_PROFILES || true)"
+
+    echo "═════════════════════════════════════════════════════════════"
+    echo "N8N has been successfully installed!"
+    box_line "Installation Mode:"       "$INSTALL_MODE"
+    box_line "Domain (n8n):"           "https://${N8N_FQDN}"
+    if [[ "$compose_profiles" == *monitoring* ]]; then
+        box_line "Grafana:"             "https://${graf_fqdn}"
+        if [[ "${expose_prom,,}" == "true" ]]; then
+            box_line "Prometheus:"      "https://${prom_fqdn}"
+        else
+            box_line "Prometheus:"      "(internal only)"
+        fi
+    fi
+    box_line "Installed Version:"       "$(get_current_n8n_version)"
+    box_line "Install Timestamp:"       "${DATE}"
+    box_line "Installed By:"            "${SUDO_USER:-$USER}"
+    box_line "Target Directory:"        "${N8N_DIR}"
+    box_line "SSL Email:"               "${SSL_EMAIL:-N/A}"
+    box_line "Execution log:"           "${LOG_FILE}"
+    echo "═════════════════════════════════════════════════════════════"
+}

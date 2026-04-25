@@ -44,11 +44,11 @@ services:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
       interval: 10s
       timeout: 5s
-      start_period: 20s
+      start_period: 10s
       retries: 5
 
   postgres:
-    image: postgres:15
+    image: postgres:15.7
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -61,26 +61,46 @@ services:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
-      start_period: 20s
+      start_period: 10s
       retries: 5
 
-  # n8n (single mode)
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
+    command: ["redis-server","--requirepass","${REDIS_PASSWORD}","--appendonly","yes"]
+    volumes:
+      - redis-data:/data
+    networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 10s
+      start_period: 10s
+      retries: 5
+
+  # Main (UI, schedules, webhooks) — does NOT execute workflows in queue mode
   main:
-    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
+    image: n8nio/n8n:${N8N_VERSION:-2.17.7}
     restart: unless-stopped
     env_file: [.env]
     environment:
       - TZ=${GENERIC_TIMEZONE}
       - N8N_METRICS=true
       - N8N_METRICS_INCLUDE_DEFAULT_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - N8N_RUNNERS_ENABLED=false  # overrides .env — main orchestrates only, workers execute
+      - N8N_RESTRICT_FILE_ACCESS_TO=/files
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [n8n-network]
-    security_opt: [no-new-privileges:true]
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:${N8N_PORT:-5678}/healthz || exit 1"]
       interval: 10s
@@ -95,27 +115,54 @@ services:
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=le"
-      # Bind the router to the named Traefik service defined below
-      - "traefik.http.routers.n8n.service=n8n"
-      - "traefik.http.services.n8n.loadbalancer.server.port=${N8N_PORT:-5678}"
+      # Traefik 'service' label name
+      - "traefik.http.routers.n8n.service=main"
+      - "traefik.http.services.main.loadbalancer.server.port=${N8N_PORT:-5678}"
       # Middlewares
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
-      # Security headers
       - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
       - "traefik.http.middlewares.n8n-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true"
       - "traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true"
       - "traefik.http.middlewares.n8n-headers.headers.stsIncludeSubdomains=true"
       - "traefik.http.middlewares.n8n-headers.headers.stsPreload=true"
-      # Rate limiting
       - "traefik.http.middlewares.n8n-rate.ratelimit.average=100"
       - "traefik.http.middlewares.n8n-rate.ratelimit.burst=50"
       - "traefik.http.middlewares.n8n-rate.ratelimit.period=1s"
-      # Retry & compression
       - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
       - "traefik.http.middlewares.n8n-compress.compress=true"
+    networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
-  # ===== Monitoring (enabled by COMPOSE_PROFILES=monitoring) =====
+  # Worker(s) – scale horizontally; each embeds its own internal runner
+  worker:
+    image: n8nio/n8n:${N8N_VERSION:-2.17.7}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      - TZ=${GENERIC_TIMEZONE}
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=internal
+      - N8N_RESTRICT_FILE_ACCESS_TO=/files
+    command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./local-files:/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:${N8N_PORT:-5678}/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  # ===== Monitoring (profile) =====
   prometheus:
     profiles: ["monitoring"]
     image: prom/prometheus:v2.54.1
@@ -128,6 +175,12 @@ services:
       - prometheus-data:/prometheus
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
     labels:
       - "traefik.enable=${EXPOSE_PROMETHEUS:-false}"
       - "traefik.docker.network=n8n-network"
@@ -168,19 +221,23 @@ services:
       - "traefik.http.routers.grafana.tls=true"
       - "traefik.http.routers.grafana.tls.certresolver=le"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      # PROXY BASIC AUTH (usersFile)
       - "traefik.http.routers.grafana.middlewares=grafana-auth@docker,secure-headers@docker"
       - "traefik.http.middlewares.grafana-auth.basicauth.usersfile=${TRAEFIK_USERSFILE}"
       - "traefik.http.middlewares.grafana-auth.basicauth.removeheader=true"
+      # Optional hardening (HSTS, XSS protection, etc.)
       - "traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000"
       - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
       - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
       - "traefik.http.middlewares.secure-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true"
-    depends_on: [prometheus]
+    depends_on:
+      prometheus:
+        condition: service_healthy
 
   postgres-exporter:
     profiles: ["monitoring"]
-    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
     restart: unless-stopped
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
@@ -190,9 +247,22 @@ services:
       postgres:
         condition: service_healthy
 
+  redis-exporter:
+    profiles: ["monitoring"]
+    image: oliver006/redis_exporter:v1.62.0
+    restart: unless-stopped
+    command:
+      - "--redis.addr=redis:6379"
+      - "--redis.password=${REDIS_PASSWORD}"
+    networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      redis:
+        condition: service_healthy
+
   cadvisor:
     profiles: ["monitoring"]
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped
     privileged: true
     volumes:
@@ -201,11 +271,10 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
-    security_opt: [no-new-privileges:true]
 
   node-exporter:
     profiles: ["monitoring"]
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
     restart: unless-stopped
     pid: "host"
     networks: [n8n-network]
@@ -228,6 +297,8 @@ volumes:
   n8n-data:
     external: true
   postgres-data:
+    external: true
+  redis-data:
     external: true
   letsencrypt:
     external: true

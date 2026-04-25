@@ -1,7 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# lib/common.sh — Common helpers reused by n8n_manager.sh & others
+# Sourced by n8n_manager.sh — do not execute directly.
+# shellcheck disable=SC2154  # Variables set by n8n_manager.sh globals
 # common.sh — Common helpers reused by n8n_manager.sh & others
-set -euo pipefail
-IFS=$'\n\t'
 
 #############################################################################################
 # n8n_common.sh - Shared functions for install/upgrade/backup/restore tooling
@@ -13,7 +14,7 @@ IFS=$'\n\t'
 #   • Docker Compose wrapper
 #   • Compose discovery (services, volumes, external volumes, expected container names)
 #   • Health checks + log dumps
-#   • “up + wait healthy” helper (with external volume ensure)
+#   • "up + wait healthy" helper (with external volume ensure)
 #   • Version & image utilities
 #   • Domain DNS sanity check and optional TLS verification
 #   • ensure_monitoring_auth(): generate htpasswd usersfile once
@@ -30,9 +31,8 @@ declare -a DISCOVERED_NETWORKS=()
 declare -a DISCOVERED_NETWORK_EXTERNAL=()
 DISCOVERED_MODE="unknown"
 
-# Logging level
-LOG_LEVEL="${LOG_LEVEL:-INFO}"
-LOG_LEVEL="${LOG_LEVEL^^}"
+# LOG_LEVEL is defined and initialized in n8n_manager.sh globals.
+# This file only reads it — do not re-initialize here.
 
 ################################################################################
 # log()
@@ -543,7 +543,7 @@ rotate_or_generate_secret() {
     if declare -F read_env_var >/dev/null 2>&1; then
         current="$(read_env_var "$envfile" "$key" || true)"
     else
-        # simple fallback (won’t handle quotes/comments as robustly as read_env_var)
+        # simple fallback (won't handle quotes/comments as robustly as read_env_var)
         current="$(awk -F= -v v="$key" '$1==v{print substr($0, index($0,$2)); exit}' "$envfile" | tr -d '\r')"
     fi
 
@@ -992,7 +992,7 @@ remove_compose_networks() {
 #
 # Behavior/Notes:
 #   - Does nothing if no labeled volumes are found.
-#   - Forces removal (-f) to avoid “in use” prompts.
+#   - Forces removal (-f) to avoid "in use" prompts.
 ################################################################################
 purge_project_volumes_by_label() {
     local pn; pn="$(project_name)"
@@ -1409,7 +1409,7 @@ list_exposed_fqdns() {
 ################################################################################
 # check_domain()
 # Description:
-#     Verify the provided DOMAIN’s A record points to this server’s public IP.
+#     Verify the provided DOMAIN's A record points to this server's public IP.
 #
 # Returns:
 #     0 on success/skip (no resolver); exits 1 on mismatch.
@@ -1456,7 +1456,7 @@ check_domain() {
 # Behaviors:
 #   - Iterates over the FQDNs emitted by `list_exposed_fqdns`.
 #   - For each FQDN, runs `check_domain` (via a temporary DOMAIN=<fqdn>)
-#     to validate public A/AAAA records (typically also matching this host’s
+#     to validate public A/AAAA records (typically also matching this host's
 #     public IP).
 #   - Aggregates failures; returns non-zero if any FQDN fails validation.
 #   - This function does not itself enforce that N8N_FQDN is set; that contract
@@ -1480,7 +1480,7 @@ preflight_dns_checks() {
 # post_up_tls_checks()
 # Description:
 #   Post-deploy TLS verification for all exposed hostnames. Treats failures as
-#   warnings by default (to tolerate Let’s Encrypt issuance/propagation lag),
+#   warnings by default (to tolerate Let's Encrypt issuance/propagation lag),
 #   but becomes strict if STRICT_TLS_ALL=true.
 #
 # Behaviors:
@@ -2218,7 +2218,7 @@ END
 # safe_wipe_target_dir()
 # Description:
 #   Delete the *contents* of $N8N_DIR (files and dotfiles), but NOT the directory
-#   itself. Includes safeguards to avoid deleting the script’s own location if
+#   itself. Includes safeguards to avoid deleting the script's own location if
 #   $SCRIPT_DIR is inside $N8N_DIR.
 #
 # Args:

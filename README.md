@@ -1,14 +1,9 @@
-# n8n Manager — Install • Upgrade • Backup • Restore • Monitor (Single or Queue Mode)
+# n8n-toolkit v3.0 — Install · Upgrade · Backup · Restore · Monitor
 
-**n8n Manager** is the all-in-one Bash CLI for fast, secure, and reliable n8n stack operations—**install**, **upgrade**, **backup**, **restore**, and **monitor** with a single script.
+**n8n-toolkit** is the all-in-one Bash CLI for fast, secure, and reliable n8n 2.x stack operations on Docker Compose.
 
 > Production-ready for Docker, with HTTPS (Traefik), PostgreSQL, Redis (Queue Mode), and a plug-and-play Prometheus & Grafana observability stack.
 
-**Related Repos:**
-
-- https://github.com/thenguyenvn90/n8n-queue-mode
-- https://github.com/thenguyenvn90/n8n-observability
-- https://nextgrowth.ai/self-host-n8n-automation-ubuntu-docker/
 ---
 
 ## Table of Contents
@@ -16,6 +11,7 @@
 - [Why Use This?](#why-use-this)
 - [Highlights](#highlights)
 - [Repository Layout](#repository-layout)
+- [n8n 2.x Compatibility (v3.0+)](#n8n-2x-compatibility-v30)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [CLI Overview](#cli-overview)
@@ -25,6 +21,7 @@
 - [Restore](#restore)
 - [Cleanup](#cleanup)
 - [Monitoring (Prometheus & Grafana)](#monitoring-prometheus--grafana)
+- [Single vs Queue Mode — Which to Choose?](#single-vs-queue-mode--which-to-choose)
 - [Queue Mode basics](#queue-mode-basics)
 - [Scheduling Daily Backups](#scheduling-daily-backups)
 - [Logs & Health](#logs--health)
@@ -70,39 +67,42 @@
 ## Repository Layout
 
 ```
-.
-├── n8n_manager.sh                      # Main script (install/upgrade/backup/restore/cleanup)
-├── common.sh                           # Shared helpers used by the manager
-├── monitoring                          # Monitoring configuration
-│   ├── grafana
-│   │   └── provisioning
-│   │       ├── alerts
-│   │       │   ├── n8n-alert-rules.yml
-│   │       │   └── system-alert-rules.yml
-│   │       ├── dashboards
-│   │       │   ├── dashboards.yml
-│   │       │   └── n8n.json
-│   │       └── datasources
-│   │           └── datasource.yml
-│   └── prometheus.yml
-├── single-mode/
-│   ├── docker-compose.yml              # Compose template (single-container n8n)
-│   └── .env                            # Template env for single mode
-├── queue-mode/
-│   ├── docker-compose.yml              # Compose template (main + redis + workers)
-│   └── .env                            # Template env for queue mode
-└── (created at runtime)
-    ├── /home/n8n/logs/                 # All run logs (or your chosen --dir)
-    │   ├── install_n8n_<ts>.log
-    │   ├── upgrade_n8n_<ts>.log
-    │   ├── backup_n8n_<ts>.log
-    │   ├── restore_n8n_<ts>.log
-    │   └── latest_<action>.log         # symlink per action (install/upgrade/backup/restore/cleanup)
-    ├── /home/n8n/backups/              # Backup archives, checksums, summary, snapshot
-    └── /home/n8n/monitoring/           # Copied when --monitoring is enabled
+n8n-toolkit/
+├── n8n_manager.sh          # Main CLI entry point
+├── lib/
+│   ├── common.sh           # Shared helpers (logging, Docker, DNS, TLS, backup)
+│   ├── install.sh          # Install logic + interactive setup wizard
+│   ├── upgrade.sh          # Upgrade logic
+│   ├── backup.sh           # Backup, restore, email, rclone upload
+│   └── cleanup.sh          # Stack teardown
+├── deploy/
+│   ├── single-mode/        # Docker Compose + .env.example (single instance)
+│   ├── queue-mode/         # Docker Compose + .env.example (workers + Redis)
+│   └── monitoring/         # Prometheus, Grafana, exporters (opt-in)
+├── docs/
+│   ├── single-mode.md
+│   ├── queue-mode.md
+│   └── monitoring.md
+└── LICENSE
 ```
 
-> **Templates:** Install copies the selected template (`single-mode/` or `queue-mode/`) into your target directory and pins your **n8n version**, **domain**, **SSL email**, **secrets**; optionally copies `monitoring/` for Prometheus/Grafana.
+> **Templates:** Install copies the selected template (`deploy/single-mode/` or `deploy/queue-mode/`) into your target directory and pins your **n8n version**, **domain**, **SSL email**, **secrets**; optionally copies `deploy/monitoring/` for Prometheus/Grafana.
+
+---
+
+## n8n 2.x Compatibility (v3.0+)
+
+This version targets **n8n 2.17.7** (pinned in `.env.example`). Key changes from 1.x:
+
+| What changed | Old (1.x) | New (2.x) |
+|---|---|---|
+| Task runner | Bundled in n8n container | Internal subprocess (enabled by default) |
+| Env var | `EXECUTIONS_PROCESS` | `EXECUTIONS_MODE=regular\|queue` |
+| Stalled job config | `QUEUE_WORKER_MAX_STALLED_COUNT` | Removed |
+| Config files | `N8N_CONFIG_FILES` | Removed — use env vars |
+| Env access in Code node | Allowed by default | Blocked by default (`N8N_BLOCK_ENV_ACCESS_IN_NODE=true`) |
+
+Run the [n8n Migration Report](https://docs.n8n.io/2-0-breaking-changes/) in Settings before upgrading from 1.x.
 
 ---
 
@@ -125,6 +125,20 @@
 ---
 
 ## Quick Start
+
+### Interactive Setup (recommended for first-time users)
+
+Run without a domain — the wizard will prompt you:
+```bash
+sudo ./n8n_manager.sh --install
+```
+
+### Non-Interactive (scripted/CI)
+```bash
+sudo ./n8n_manager.sh --install example.com \
+  -m you@example.com \
+  --mode single
+```
 
 ### Get the Repository
 
@@ -509,13 +523,26 @@ To (un)expose Prometheus later, set `EXPOSE_PROMETHEUS=true|false` in `.env` and
 
 > When monitoring is enabled, `grafana-data` and `prometheus-data` volumes are **included** in backups/restores.
 
-👉 For deeper context on n8n monitoring, see the guide: **[n8n-observability](https://github.com/thenguyenvn90/n8n-observability)**
+👉 For deeper context on n8n monitoring, see [`docs/monitoring.md`](./docs/monitoring.md).
+
+---
+
+## Single vs Queue Mode — Which to Choose?
+
+| Factor | Single Mode | Queue Mode |
+|--------|------------|------------|
+| **VPS size** | 1–2 vCPU, 1–4 GB RAM | 2+ vCPU, 4+ GB RAM |
+| **Concurrent executions** | Low (< 10 simultaneous) | High (10+ simultaneous) |
+| **Infrastructure** | n8n + Postgres + Traefik | + Redis + n8n-worker(s) |
+| **Setup complexity** | Simple | Moderate |
+| **Horizontal scaling** | No | Yes (`--scale worker=N`) |
+| **Recommended for** | Personal projects, small teams | Production, high-throughput |
+
+**Rule of thumb:** Start with single mode. Move to queue when you need > 10 concurrent executions or see CPU/memory pressure.
 
 ---
 
 ## Queue Mode basics
-
-👉 For deeper context on queue mode, see the guide: **[n8n-queue-mode](https://github.com/thenguyenvn90/n8n-queue-mode/blob/main/README.md)**
 
 ⚠️ Set `N8N_WORKER_SCALE` in `.env` to change worker replicas (default 1).
 
@@ -717,5 +744,3 @@ See [LICENSE](./LICENSE) for details.
 ## Related Projects
 
 - [n8n Documentation](https://docs.n8n.io)
-- [n8n-observability](https://github.com/thenguyenvn90/n8n-observability)
-- [n8n-queue-mode](https://github.com/thenguyenvn90/n8n-queue-mode)
