@@ -27,8 +27,6 @@ upgrade_stack() {
     N8N_FQDN="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
 
     log INFO "Checking current and target n8n versions..."
-    cd "$N8N_DIR" || { log ERROR "Failed to change directory to $N8N_DIR"; return 1; }
-
     local current_version target_version
     current_version=$(get_current_n8n_version || echo "0.0.0")
     target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1

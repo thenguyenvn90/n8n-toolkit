@@ -234,6 +234,10 @@ cleanup_stack() {
 
     # ---------- Confirmation (ALL only) ----------
     if $NUKE_ALL; then
+        if [[ ! -t 0 ]]; then
+            log ERROR "cleanup --all requires an interactive terminal (stdin is not a TTY)"
+            exit 2
+        fi
         local ans
         read -r -p "Proceed with FULL cleanup (all)? (yes/no) [no]: " ans
         case "${ans,,}" in

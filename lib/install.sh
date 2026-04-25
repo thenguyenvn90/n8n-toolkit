@@ -59,7 +59,7 @@ copy_templates_for_mode() {
     rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
 
     # Queue mode only
-    if [[ "${INSTALL_MODE:-single}" == "queue" ]] || [[ "${DISCOVERED_MODE:-}" == "queue" ]]; then
+    if [[ "${INSTALL_MODE:-single}" == "queue" ]]; then
         rotate_or_generate_secret "$ENV_FILE" REDIS_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
     fi
 

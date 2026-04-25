@@ -31,9 +31,8 @@ declare -a DISCOVERED_NETWORKS=()
 declare -a DISCOVERED_NETWORK_EXTERNAL=()
 DISCOVERED_MODE="unknown"
 
-# Logging level
-LOG_LEVEL="${LOG_LEVEL:-INFO}"
-LOG_LEVEL="${LOG_LEVEL^^}"
+# LOG_LEVEL is defined and initialized in n8n_manager.sh globals.
+# This file only reads it — do not re-initialize here.
 
 ################################################################################
 # log()

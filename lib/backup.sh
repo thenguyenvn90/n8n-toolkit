@@ -40,6 +40,7 @@ do_local_backup() {
     log INFO "Backing up Docker volumes..."
     local vol
     for vol in "${DISCOVERED_VOLUMES[@]}"; do
+        local real
         real="$(resolve_volume_name "$vol" || true)"
         if [[ -z "$real" ]]; then
             log INFO "Skipping volume '$vol' (not present on host)."
@@ -573,6 +574,7 @@ restore_stack() {
         log INFO "Skipping volume '$vol' (TLS certs) during restore."
         continue
     fi
+    local real
     real="$(resolve_volume_name "$vol" || expected_volume_name "$vol")"
     if docker volume inspect "$real" >/dev/null 2>&1; then
         docker volume rm "$real" && log INFO "Removed volume: $vol"
@@ -591,6 +593,7 @@ restore_stack() {
         return 1
     fi
 
+    local real
     real="$(expected_volume_name "$vol")"
     docker volume create "$real" >/dev/null
 
@@ -655,7 +658,7 @@ restore_stack() {
 
     # When the PostgreSQL DB is ready, start other containers
     log INFO "Starting the rest of the stack..."
-    ensure_external_volumes
+    ensure_external_volumes  # called again after DB restore — volumes may have been re-created
 
     docker_up_check || { log ERROR "Stack unhealthy after restore."; exit 1; }
     post_up_tls_checks || true

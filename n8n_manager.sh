@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # N8N Installation, Upgrade, Backup & Restore Manager (Mode-aware: Single or Queue)
 # Author:      TheNguyen
 # Email:       thenguyen.ai.automation@gmail.com
-# Version:     2.1.0
+# Version:     3.0.0
 # Date:        2025-09-06
 #
 # Description:
@@ -49,6 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load shared helpers
 LIB_DIR="$SCRIPT_DIR/lib"
+# Source order is load-bearing: common.sh must come first (all other libs depend on its functions and globals)
 for _lib in common.sh install.sh upgrade.sh backup.sh cleanup.sh; do
     _path="$LIB_DIR/$_lib"
     if [[ -f "$_path" ]]; then
