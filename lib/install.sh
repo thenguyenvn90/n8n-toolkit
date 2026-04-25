@@ -70,7 +70,7 @@ copy_templates_for_mode() {
 
     if $MONITORING; then
         upsert_env_var "COMPOSE_PROFILES" "monitoring" "$ENV_FILE"
-        local mon_src="$SCRIPT_DIR/monitoring"
+        local mon_src="$SCRIPT_DIR/deploy/monitoring"
         local mon_dst="$N8N_DIR/monitoring"
         if [[ -d "$mon_src" ]]; then
             mkdir -p "$mon_dst"
