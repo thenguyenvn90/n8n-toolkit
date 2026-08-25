@@ -183,3 +183,70 @@ EOF
     done <<< "$output"
     $found
 }
+
+# ---------------------------------------------------------------------------
+# Toolkit self-version
+#
+# -v/--version selects the n8n version to deploy, so until now there was no way
+# to ask which revision of the TOOLKIT was running. Issue #4 was hard to pin
+# down for exactly that reason.
+# ---------------------------------------------------------------------------
+
+@test "--self-version prints a semver matching TOOLKIT_VERSION" {
+    run bash "$REPO_ROOT/n8n_manager.sh" --self-version
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+    declared="$(grep -m1 -E '^TOOLKIT_VERSION=' "$REPO_ROOT/n8n_manager.sh" | cut -d'"' -f2)"
+    [ "$output" = "$declared" ]
+}
+
+@test "--self-version does not require root" {
+    # It only reads. Requiring root to ask "what version is this?" is how bug
+    # reports end up without one.
+    run bash "$REPO_ROOT/n8n_manager.sh" --self-version
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"must be run as root"* ]]
+}
+
+@test "--self-version is distinct from -v (which selects the n8n version)" {
+    run bash "$REPO_ROOT/n8n_manager.sh" --self-version
+    local toolkit="$output"
+    # -v alone is not an action, so the script must not silently treat it as one
+    run bash "$REPO_ROOT/n8n_manager.sh" -v 2.23.2
+    [ "$status" -ne 0 ]
+    [ -n "$toolkit" ]
+}
+
+@test "the log stamp carries the toolkit version" {
+    grep -q 'log INFO "n8n-toolkit \${TOOLKIT_VERSION}' "$REPO_ROOT/n8n_manager.sh"
+}
+
+# ---------------------------------------------------------------------------
+# send_email() temp-file hygiene
+# ---------------------------------------------------------------------------
+
+@test "send_email removes its password temp file even on an early return" {
+    # The rm used to sit on the happy path only, so an interrupt or an errexit
+    # between mktemp and rm left SMTP_PASS in /tmp as plaintext.
+    grep -q "trap 'rm -f \"\$pass_tmp\"' RETURN" "$REPO_ROOT/lib/common.sh"
+}
+
+@test "send_email leaves no password file behind when msmtp is missing" {
+    # Scoped to a private TMPDIR so mktemp writes here and nothing else does.
+    # An earlier version of this test grepped the whole of /tmp and went red on
+    # CI, where unreadable directories put permission errors into the output.
+    local sandbox="$BATS_TEST_TMPDIR/mailtmp"
+    mkdir -p "$sandbox"
+
+    TMPDIR="$sandbox" SMTP_USER="a@b.c" SMTP_PASS="hunter2" EMAIL_TO="d@e.f" \
+        run send_email "subject" "body"
+    [ "$status" -ne 0 ]
+
+    # No leftover file, and nothing in the sandbox holds the password.
+    local leftovers
+    leftovers="$(find "$sandbox" -type f | wc -l)"
+    [ "$leftovers" -eq 0 ]
+    run grep -rl "hunter2" "$sandbox"
+    [ "$status" -ne 0 ]
+}
