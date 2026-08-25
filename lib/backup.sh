@@ -531,14 +531,12 @@ recent_backup_exists() {
 #     (that archive already holds the same data).
 #   - Keeps the last 3 snapshots per kind, by count.
 #
-# Output:
-#   Prints the snapshot directory path to stdout on success.
-#
 # Returns:
 #   0 on success (including the degraded config-only case); 1 if the snapshot
 #   directory could not be created.
 ################################################################################
 snapshot_current_state() {
+    SNAPSHOT_DIR=""
     local kind="${1:-pre-restore}"
     local root="$BACKUP_DIR/$kind"
     local dir="$root/$DATE"
@@ -561,7 +559,7 @@ snapshot_current_state() {
 
     if recent_backup_exists 60; then
         log INFO "A full backup exists from the last hour; skipping the snapshot DB dump."
-        printf '%s\n' "$dir"
+        SNAPSHOT_DIR="$dir"
         snapshot_keep_last "$root" 3
         return 0
     fi
@@ -570,7 +568,7 @@ snapshot_current_state() {
     pg_cid="$(container_id_for_service "$POSTGRES_SERVICE" 2>/dev/null || true)"
     if [[ -z "$pg_cid" ]]; then
         log INFO "PostgreSQL not running; snapshot is config-only."
-        printf '%s\n' "$dir"
+        SNAPSHOT_DIR="$dir"
         snapshot_keep_last "$root" 3
         return 0
     fi
@@ -590,7 +588,7 @@ snapshot_current_state() {
         log WARN "Snapshot DB dump failed; snapshot is config-only."
     fi
 
-    printf '%s\n' "$dir"
+    SNAPSHOT_DIR="$dir"
     snapshot_keep_last "$root" 3
     return 0
 }
@@ -750,13 +748,12 @@ restore_stack() {
         return 1
     fi
 
-    local snap_dir
-    if ! snap_dir="$(snapshot_current_state pre-restore)"; then
+    if ! snapshot_current_state pre-restore; then
         log ERROR "Could not snapshot the current state; refusing to restore."
         rm -rf "$restore_dir"
         return 1
     fi
-    log INFO "Pre-restore snapshot: $snap_dir"
+    log INFO "Pre-restore snapshot: $SNAPSHOT_DIR"
     log INFO "If this restore goes wrong, the previous .env and compose are in that directory."
 
     log INFO "Restoring local-files directory..."

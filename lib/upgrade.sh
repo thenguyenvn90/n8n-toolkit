@@ -53,9 +53,15 @@ upgrade_stack() {
     log INFO "Updating .env with ${tag_var}=$target_version"
     upsert_env_var "$tag_var" "$target_version" "$ENV_FILE"
 
-    local snap_dir
-    if snap_dir="$(snapshot_current_state pre-upgrade)"; then
-        log INFO "Pre-upgrade snapshot: $snap_dir"
+    # Writing the file is not enough. load_env_file() above sourced .env with
+    # allexport, so the OLD tag is still exported in this process - and Docker
+    # Compose resolves shell environment variables ahead of --env-file. Without
+    # this the stack comes back up on the version it was already running, while
+    # .env and the summary both claim the new one.
+    export "${tag_var}=${target_version}"
+
+    if snapshot_current_state pre-upgrade; then
+        log INFO "Pre-upgrade snapshot: $SNAPSHOT_DIR"
         log INFO "Roll back with: n8n_manager.sh -r <archive>  (config copy is in that directory)"
     else
         log WARN "Pre-upgrade snapshot failed; continuing without a rescue copy."
@@ -70,11 +76,19 @@ upgrade_stack() {
     docker_up_check || { log ERROR "Stack unhealthy after upgrade."; exit 1; }
     post_up_tls_checks || true
 
+    local running_version
+    running_version="$(get_current_n8n_version)"
+    if [[ "$running_version" != "$target_version" ]]; then
+        log ERROR "Upgrade did not take: asked for $target_version, running $running_version."
+        log ERROR "The stack is up but on the wrong version. Roll back with the pre-upgrade snapshot if needed."
+        return 1
+    fi
+
     echo "═════════════════════════════════════════════════════════════"
     echo "N8N has been successfully upgraded!"
     box_line "Detected Mode:"           "${DISCOVERED_MODE:-unknown}"
     box_line "Domain (n8n):"            "https://${N8N_FQDN}"
-    box_line "Upgraded Version:"        "$(get_current_n8n_version)"
+    box_line "Upgraded Version:"        "$running_version"
     box_line "Upgraded Timestamp:"      "${DATE}"
     box_line "Upgraded By:"             "${SUDO_USER:-$USER}"
     box_line "Target Directory:"        "${N8N_DIR}"
