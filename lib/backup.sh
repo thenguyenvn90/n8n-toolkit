@@ -111,7 +111,7 @@ do_local_backup() {
     chmod 600 "$BACKUP_DIR/"*.tar.gz 2>/dev/null || true
     chmod 600 "$BACKUP_DIR/"*.sha256 2>/dev/null || true
 
-    log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days..."
+    log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days (--keep-days)..."
     rm -rf "$BACKUP_PATH"
     # -maxdepth 1 keeps the prune out of backups/pre-restore/ and backups/pre-upgrade/.
     # Those are rescue copies kept by count, not by age — a prune that eats them
