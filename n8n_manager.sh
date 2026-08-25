@@ -47,6 +47,11 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The toolkit's own version. Note this is NOT -v/--version, which selects the
+# n8n version to deploy. Printed by --self-version and stamped at the top of
+# every log file so a bug report can name the revision it came from.
+TOOLKIT_VERSION="3.1.0"
+
 # Load shared helpers
 LIB_DIR="$SCRIPT_DIR/lib"
 # Source order is load-bearing: common.sh must come first (all other libs depend on its functions and globals)
@@ -152,6 +157,8 @@ trap on_interrupt INT TERM HUP
 ################################################################################
 usage() {
     cat <<EOF
+n8n-toolkit ${TOOLKIT_VERSION}
+
 Usage: $0 [ONE ACTION] [OPTIONS]
 
 Actions (choose exactly one):
@@ -184,6 +191,8 @@ Options:
   -e, --email-to <email>    Send notifications to this address (requires SMTP_USER/SMTP_PASS env)
   -n, --notify-on-success   Also email on success (not just failures)
   -s, --remote-name <name>  rclone remote root (e.g. gdrive-user or gdrive-user:/n8n-backups)
+      --self-version        Print the toolkit version and exit
+                            (-v selects the n8n version; this is the toolkit)
   -h, --help                Show this help
 
 # Monitoring-related (install-time):
@@ -258,6 +267,7 @@ set_paths() {
     umask 0077
     exec > >(tee -a "$LOG_FILE") 2>&1
     ln -sf "$LOG_FILE" "$LOG_DIR/latest_${mode}.log"
+    log INFO "n8n-toolkit ${TOOLKIT_VERSION} (${mode})"
     log INFO "Working directory: $N8N_DIR"
     log INFO "Logging to: $LOG_FILE"
 }
@@ -271,7 +281,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -372,6 +382,10 @@ parse_args() {
                 FORCE_FLAG=true
                 shift
                 ;;
+            --self-version)
+                printf '%s\n' "$TOOLKIT_VERSION"
+                exit 0
+                ;;
             -h|--help)
                 usage
                 ;;
@@ -426,6 +440,16 @@ parse_args() {
 #   Exit code from the selected subroutine.
 ################################################################################
 main() {
+    # --self-version and --help only read; requiring root to ask "what version
+    # is this?" is how bug reports end up without one.
+    local _arg
+    for _arg in "$@"; do
+        case "$_arg" in
+            --self-version) printf '%s\n' "$TOOLKIT_VERSION"; exit 0 ;;
+            -h|--help)      usage ;;
+        esac
+    done
+
     check_root
     parse_args "$@"
     mkdir -p "$N8N_DIR"

@@ -1894,7 +1894,12 @@ send_email() {
     log INFO "Sending email to: $EMAIL_TO"
 
     # Protect password for passwordeval
-    local pass_tmp; pass_tmp="$(mktemp)"; printf '%s' "$SMTP_PASS" > "$pass_tmp"; chmod 600 "$pass_tmp"
+    local pass_tmp; pass_tmp="$(mktemp)"
+    # RETURN fires on a normal return AND on an errexit unwind, so the password
+    # file cannot outlive this function. Without it, an interrupt between here
+    # and the rm below left SMTP_PASS in /tmp as plaintext.
+    trap 'rm -f "$pass_tmp"' RETURN
+    printf '%s' "$SMTP_PASS" > "$pass_tmp"; chmod 600 "$pass_tmp"
     local boundary="=====n8n_backup_$(date +%s)_$$====="
 
     {
