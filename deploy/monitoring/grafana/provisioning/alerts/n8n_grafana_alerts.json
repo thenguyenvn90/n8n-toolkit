@@ -635,6 +635,206 @@
           "isPaused": false
         }
       ]
+    },
+    {
+      "orgId": 1,
+      "name": "n8n - Workers",
+      "folder": "n8n Alerts",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "n8n-worker-down",
+          "title": "Worker down",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 120, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "min_over_time(up{job=\"n8n-worker\"}[2m])",
+                "instant": false,
+                "interval": "",
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 120, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": {
+                      "params": [
+                        "A"
+                      ]
+                    },
+                    "reducer": {
+                      "type": "last"
+                    },
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        0.5
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "2m",
+          "noDataState": "OK",
+          "execErrState": "Alerting",
+          "labels": {
+            "severity": "critical",
+            "mode": "queue"
+          },
+          "annotations": {
+            "summary": "An n8n worker target is down",
+            "description": "Prometheus 'up' for job=n8n-worker is 0 for 2m on {{ $labels.instance }}. No targets at all means zero workers are running, which does not alert.",
+            "value": "{{ $values.A }}",
+            "duration": "{{ $duration }}"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-worker-rss-high",
+          "title": "Worker resident memory high",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "(n8n_process_resident_memory_bytes{job=\"n8n-worker\"} or process_resident_memory_bytes{job=\"n8n-worker\"})",
+                "instant": false,
+                "interval": "",
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": {
+                      "params": [
+                        "A"
+                      ]
+                    },
+                    "reducer": {
+                      "type": "last"
+                    },
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        891289600
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "10m",
+          "noDataState": "OK",
+          "execErrState": "Alerting",
+          "labels": {
+            "severity": "warning",
+            "mode": "queue"
+          },
+          "annotations": {
+            "summary": "Worker RSS > ~850 MiB",
+            "description": "A worker is holding more than 850 MiB for 10m on {{ $labels.instance }}. The usual cause is a Code node duplicating a large JSON payload.",
+            "value": "{{ $values.A }}",
+            "duration": "{{ $duration }}"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "n8n-worker-eventloop-lag",
+          "title": "Worker event loop lag p99 high",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "PBFA97CFB590B2093",
+              "model": {
+                "editorMode": "code",
+                "expr": "max by (instance) (n8n_nodejs_eventloop_lag_p99_seconds{job=\"n8n-worker\"}) or max by (instance) (nodejs_eventloop_lag_seconds{job=\"n8n-worker\"})",
+                "instant": false,
+                "interval": "",
+                "legendFormat": "{{instance}}",
+                "range": true
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": { "from": 300, "to": 0 },
+              "datasourceUid": "__expr__",
+              "model": {
+                "type": "classic_conditions",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "query": {
+                      "params": [
+                        "A"
+                      ]
+                    },
+                    "reducer": {
+                      "type": "last"
+                    },
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0.5
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "Alerting",
+          "labels": {
+            "severity": "warning",
+            "mode": "queue"
+          },
+          "annotations": {
+            "summary": "Worker event loop lag p99 > 500ms",
+            "description": "Severe lag on worker {{ $labels.instance }} - the worker is CPU-bound or doing sync work.",
+            "value": "{{ $values.A }}",
+            "duration": "{{ $duration }}"
+          },
+          "isPaused": false
+        }
+      ]
     }
   ]
 }

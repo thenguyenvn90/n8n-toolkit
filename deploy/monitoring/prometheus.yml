@@ -26,6 +26,18 @@ scrape_configs:
         labels:
           instance: n8n-main
 
+  # Workers, discovered by DNS so `compose up --scale worker=N` is picked up
+  # without editing this file. Deliberately NOT job=n8n: every existing alert
+  # rule is scoped to that label, and `n8n Down` (min_over_time(up{job="n8n"}))
+  # would fire every time a worker is scaled down.
+  - job_name: n8n-worker
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ['worker']
+        type: A
+        port: 5678
+    scrape_interval: 15s
+
   - job_name: postgres_exporter
     static_configs:
       - targets: ['postgres-exporter:9187']

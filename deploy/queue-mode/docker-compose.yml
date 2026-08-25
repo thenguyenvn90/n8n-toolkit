@@ -144,6 +144,11 @@ services:
       - N8N_RUNNERS_ENABLED=true
       - N8N_RUNNERS_MODE=internal
       - N8N_RESTRICT_FILE_ACCESS_TO=/files
+      # Workers execute the workflows, so their CPU/RSS/event-loop numbers are
+      # the ones that matter in queue mode. Served by the worker HTTP server on
+      # QUEUE_HEALTH_CHECK_PORT (n8n WorkerServer), not on N8N_PORT.
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_DEFAULT_METRICS=true
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
@@ -156,7 +161,7 @@ services:
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:${N8N_PORT:-5678}/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:${QUEUE_HEALTH_CHECK_PORT:-5678}/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       start_period: 30s
