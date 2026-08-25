@@ -97,6 +97,8 @@ BACKUP_REQUIRE_TLS="${BACKUP_REQUIRE_TLS:-false}"
 
 # Monitoring & subdomain CLI overrides (defaults live in .env templates)
 MONITORING=false
+# Local mode: self-signed TLS on *.localhost, no public DNS, no ACME.
+LOCAL_MODE=false
 EXPOSE_PROMETHEUS=false
 SUBDOMAIN_N8N=""
 SUBDOMAIN_GRAFANA=""
@@ -201,6 +203,9 @@ Options:
   -h, --help                Show this help
 
 # Monitoring-related (install-time):
+  --local                             Self-signed TLS on *.localhost; skips the DNS
+                                      check and Let's Encrypt. For trying the stack
+                                      locally or in CI, not for a public server
   --monitoring                        Enable Prometheus/Grafana profile
   --expose-prometheus                 Expose Prometheus publicly (default: private)
   --subdomain-n8n <sub>               Override n8n subdomain (default: n8n)
@@ -289,7 +294,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -357,6 +362,10 @@ parse_args() {
             --mode)
                 INSTALL_MODE="$2"
                 shift 2
+                ;;
+            --local)
+                LOCAL_MODE=true
+                shift
                 ;;
             --monitoring)
                 MONITORING=true
@@ -426,6 +435,19 @@ parse_args() {
     if (( count != 1 )); then
         log ERROR "Choose exactly one action."
         usage
+    fi
+
+    # --local runs on *.localhost, so a domain is neither needed nor meaningful.
+    if [[ "${LOCAL_MODE:-false}" == true ]]; then
+        if [[ "${DO_INSTALL:-false}" != true ]]; then
+            log ERROR "--local applies to --install only; later commands read it from the install directory."
+            exit 2
+        fi
+        if [[ -z "$DOMAIN" ]]; then
+            DOMAIN="localhost"
+            log INFO "Local mode: using domain 'localhost'."
+        fi
+        [[ -n "$SSL_EMAIL" ]] || SSL_EMAIL="local@localhost"
     fi
 
     # Owner provisioning needs both halves. One without the other silently does
