@@ -116,7 +116,12 @@ OWNER_PASSWORD=""
 
 # Backup/Restore
 TARGET_RESTORE_FILE=""
+# Backup retention, in days. Settable with --keep-days; 7 is short for backups
+# and the operator could not change it before.
 DAYS_TO_KEEP=7
+# Log retention. Deliberately NOT settable: nobody has asked to tune it, and
+# one flag governing three different lifetimes is how it got confusing.
+LOG_KEEP_DAYS=7
 POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
 
 # Email (msmtp) - notification recipient (separate from SSL_EMAIL)
@@ -195,6 +200,8 @@ Options:
   -d, --dir <path>          Target n8n directory (default: /home/n8n)
   -l, --log-level <LEVEL>   DEBUG | INFO (default) | WARN | ERROR
   -f, --force               Upgrade: allow downgrade or redeploy; Backup: force even if unchanged
+      --keep-days <N>       Days to keep backups, local and remote (default: 7)
+                            Logs are pruned after 7 days regardless
   -e, --email-to <email>    Send notifications to this address (requires SMTP_USER/SMTP_PASS env)
   -n, --notify-on-success   Also email on success (not just failures)
   -s, --remote-name <name>  rclone remote root (e.g. gdrive-user or gdrive-user:/n8n-backups)
@@ -294,7 +301,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,keep-days:,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -367,6 +374,10 @@ parse_args() {
                 LOCAL_MODE=true
                 shift
                 ;;
+            --keep-days)
+                DAYS_TO_KEEP="$2"
+                shift 2
+                ;;
             --monitoring)
                 MONITORING=true
                 shift
@@ -435,6 +446,14 @@ parse_args() {
     if (( count != 1 )); then
         log ERROR "Choose exactly one action."
         usage
+    fi
+
+    # Defaulted rather than read bare: parse_args is also driven directly by the
+    # test harness, which cannot be expected to initialise every new global.
+    DAYS_TO_KEEP="${DAYS_TO_KEEP:-7}"
+    if [[ ! "$DAYS_TO_KEEP" =~ ^[0-9]+$ ]] || (( DAYS_TO_KEEP < 1 )); then
+        log ERROR "--keep-days must be a positive integer (got '$DAYS_TO_KEEP')."
+        exit 2
     fi
 
     # --local runs on *.localhost, so a domain is neither needed nor meaningful.
@@ -525,7 +544,7 @@ main() {
     fi
 
     # post-run housekeeping
-    find "$LOG_DIR" -type f -mtime +$DAYS_TO_KEEP -delete || true
+    find "$LOG_DIR" -type f -mtime +$LOG_KEEP_DAYS -delete || true
 }
 
 main "$@"
