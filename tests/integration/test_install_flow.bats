@@ -17,17 +17,12 @@ setup() {
     export ENV_FILE="$N8N_DIR/.env"
     export COMPOSE_FILE="$N8N_DIR/docker-compose.yml"
 
-    # Build temporary template dirs with .env copied from .env.example
+    # Mirror the real deploy templates (.env.example, no .env) into a temp dir
     _TMP_SINGLE="$BATS_TEST_TMPDIR/templates/single-mode"
     _TMP_QUEUE="$BATS_TEST_TMPDIR/templates/queue-mode"
     mkdir -p "$_TMP_SINGLE" "$_TMP_QUEUE"
     cp -a "$REPO_ROOT/deploy/single-mode/." "$_TMP_SINGLE/"
     cp -a "$REPO_ROOT/deploy/queue-mode/."  "$_TMP_QUEUE/"
-    # Create .env from .env.example if the template ships only .env.example
-    [[ ! -f "$_TMP_SINGLE/.env" && -f "$_TMP_SINGLE/.env.example" ]] \
-        && cp "$_TMP_SINGLE/.env.example" "$_TMP_SINGLE/.env"
-    [[ ! -f "$_TMP_QUEUE/.env"  && -f "$_TMP_QUEUE/.env.example"  ]] \
-        && cp "$_TMP_QUEUE/.env.example"  "$_TMP_QUEUE/.env"
     export TEMPLATE_SINGLE="$_TMP_SINGLE"
     export TEMPLATE_QUEUE="$_TMP_QUEUE"
 }

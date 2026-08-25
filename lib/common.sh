@@ -1805,6 +1805,30 @@ validate_image_tag() {
 }
 
 ################################################################################
+# compose_image_tag_var()
+# Description:
+#     Print the env var name the deployed compose file interpolates for the n8n
+#     image tag. Templates <= v3.0 used N8N_VERSION; current templates use
+#     N8N_IMAGE_TAG (the name install/upgrade have always written). Deployments
+#     created from an older template keep their own compose copy, so the tag must
+#     be written under whichever name that copy actually reads.
+#
+# Output:
+#     "N8N_IMAGE_TAG" (default) or "N8N_VERSION".
+#
+# Returns:
+#     0 always.
+################################################################################
+compose_image_tag_var() {
+    local file="${1:-${COMPOSE_FILE:-}}"
+    if [[ -f "$file" ]] && ! grep -q '\${N8N_IMAGE_TAG' "$file" && grep -q '\${N8N_VERSION' "$file"; then
+        echo "N8N_VERSION"
+        return 0
+    fi
+    echo "N8N_IMAGE_TAG"
+}
+
+################################################################################
 # resolve_n8n_target_version()
 # Description:
 #     Determine a concrete n8n Docker image tag to deploy.

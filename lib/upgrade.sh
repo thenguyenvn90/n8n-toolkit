@@ -13,7 +13,8 @@
 #       * explicit -v, else latest stable via get_latest_n8n_version()
 #   - Prevents downgrades unless --force; prevents no-op redeploy unless --force.
 #   - Validates target tag with validate_image_tag().
-#   - Writes N8N_IMAGE_TAG to .env; brings stack down (compose down).
+#   - Writes the image tag to .env under the name the deployed compose reads
+#     (N8N_IMAGE_TAG, or N8N_VERSION for pre-v3.1 compose copies); compose down.
 #   - Re-validates compose/env; brings stack up; waits for health & TLS.
 #   - Prints a summary on success.
 #
@@ -22,6 +23,10 @@
 ################################################################################
 upgrade_stack() {
     [[ -f "$ENV_FILE" && -f "$COMPOSE_FILE" ]] || { log ERROR "Compose/.env not found in $N8N_DIR"; exit 1; }
+
+    # Snapshot the requested tag BEFORE load_env_file: that call sources .env with
+    # allexport, so a legacy .env carrying N8N_VERSION= would silently overwrite -v.
+    local requested_version="${N8N_VERSION:-latest}"
     load_env_file
     ensure_monitoring_auth
     N8N_FQDN="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
@@ -29,7 +34,7 @@ upgrade_stack() {
     log INFO "Checking current and target n8n versions..."
     local current_version target_version
     current_version=$(get_current_n8n_version || echo "0.0.0")
-    target_version="$(resolve_n8n_target_version "$N8N_VERSION")" || exit 1
+    target_version="$(resolve_n8n_target_version "$requested_version")" || exit 1
     log INFO "Current version: $current_version  ->  Target version: $target_version"
 
     if [[ "$(printf "%s\n%s" "$target_version" "$current_version" | sort -V | head -n1)" == "$target_version" \
@@ -44,8 +49,9 @@ upgrade_stack() {
         exit 0
     fi
 
-    log INFO "Updating .env with N8N_IMAGE_TAG=$target_version"
-    upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
+    local tag_var; tag_var="$(compose_image_tag_var "$COMPOSE_FILE")"
+    log INFO "Updating .env with ${tag_var}=$target_version"
+    upsert_env_var "$tag_var" "$target_version" "$ENV_FILE"
 
     log INFO "Stopping and removing existing containers..."
     compose down --remove-orphans || true

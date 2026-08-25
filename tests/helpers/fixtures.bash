@@ -161,10 +161,9 @@ setup_n8n_dir() {
     make_compose_file "$n8n_dir"
 }
 
-# Create .env files in deploy templates from their .env.example sources.
-# copy_templates_for_mode() requires deploy/single-mode/.env and deploy/queue-mode/.env
-# to exist. In the real repo these are .env.example and must be copied once.
-# This helper creates a temp mirror of the deploy templates with .env present.
+# Mirror the deploy templates into a writable temp dir.
+# The mirror keeps the real repo layout (.env.example, no .env) so tests exercise
+# the same template files copy_templates_for_mode() sees in production.
 #
 # Sets TEMPLATE_SINGLE and TEMPLATE_QUEUE to point to the temp dirs.
 setup_template_envs() {
@@ -178,12 +177,6 @@ setup_template_envs() {
     # Copy all files from real templates
     cp -a "$repo_root/deploy/single-mode/." "$tmp_single/"
     cp -a "$repo_root/deploy/queue-mode/."  "$tmp_queue/"
-
-    # Create .env from .env.example if missing
-    [[ ! -f "$tmp_single/.env" && -f "$tmp_single/.env.example" ]] \
-        && cp "$tmp_single/.env.example" "$tmp_single/.env"
-    [[ ! -f "$tmp_queue/.env"  && -f "$tmp_queue/.env.example"  ]] \
-        && cp "$tmp_queue/.env.example"  "$tmp_queue/.env"
 
     export TEMPLATE_SINGLE="$tmp_single"
     export TEMPLATE_QUEUE="$tmp_queue"
