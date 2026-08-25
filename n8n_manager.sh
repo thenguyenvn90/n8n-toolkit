@@ -448,6 +448,9 @@ parse_args() {
         usage
     fi
 
+    # Defaulted rather than read bare: parse_args is also driven directly by the
+    # test harness, which cannot be expected to initialise every new global.
+    DAYS_TO_KEEP="${DAYS_TO_KEEP:-7}"
     if [[ ! "$DAYS_TO_KEEP" =~ ^[0-9]+$ ]] || (( DAYS_TO_KEEP < 1 )); then
         log ERROR "--keep-days must be a positive integer (got '$DAYS_TO_KEEP')."
         exit 2
