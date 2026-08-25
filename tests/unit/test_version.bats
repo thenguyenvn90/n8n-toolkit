@@ -233,16 +233,20 @@ EOF
 }
 
 @test "send_email leaves no password file behind when msmtp is missing" {
-    local before after
-    before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'tmp*' 2>/dev/null | wc -l)"
+    # Scoped to a private TMPDIR so mktemp writes here and nothing else does.
+    # An earlier version of this test grepped the whole of /tmp and went red on
+    # CI, where unreadable directories put permission errors into the output.
+    local sandbox="$BATS_TEST_TMPDIR/mailtmp"
+    mkdir -p "$sandbox"
 
-    SMTP_USER="a@b.c" SMTP_PASS="hunter2" EMAIL_TO="d@e.f" \
+    TMPDIR="$sandbox" SMTP_USER="a@b.c" SMTP_PASS="hunter2" EMAIL_TO="d@e.f" \
         run send_email "subject" "body"
     [ "$status" -ne 0 ]
 
-    after="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'tmp*' 2>/dev/null | wc -l)"
-    [ "$after" -le "$before" ]
-    # and nothing on disk holds the password
-    run grep -rl "hunter2" "${TMPDIR:-/tmp}" --include='tmp*' 2>/dev/null
-    [ -z "$output" ]
+    # No leftover file, and nothing in the sandbox holds the password.
+    local leftovers
+    leftovers="$(find "$sandbox" -type f | wc -l)"
+    [ "$leftovers" -eq 0 ]
+    run grep -rl "hunter2" "$sandbox"
+    [ "$status" -ne 0 ]
 }
