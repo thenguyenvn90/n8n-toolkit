@@ -183,6 +183,18 @@ jobs:
           fi
           grep -q "still the shipped placeholder" /tmp/doctor_bad.txt
 
+      - name: Backup encryption round-trips on a real archive
+        run: |
+          export BACKUP_PASSPHRASE="smoke-test-passphrase"
+          sudo -E ./n8n_manager.sh -b -f --encrypt -d "$N8N_DIR"
+          enc="$(sudo find "$N8N_DIR/backups" -maxdepth 1 -name '*.tar.gz.gpg' -print -quit)"
+          test -n "$enc"
+          # The encryption key must not be readable in the encrypted archive.
+          key="$(sudo grep -E '^N8N_ENCRYPTION_KEY=' "$N8N_DIR/.env" | cut -d= -f2)"
+          ! sudo grep -qF "$key" "$enc"
+          # And it must restore.
+          sudo -E ./n8n_manager.sh -r "$enc" -f -d "$N8N_DIR"
+
       - name: Workers expose metrics under their own job label
         if: matrix.mode == 'queue'
         run: |

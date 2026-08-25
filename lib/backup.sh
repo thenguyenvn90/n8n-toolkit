@@ -111,16 +111,177 @@ do_local_backup() {
     chmod 600 "$BACKUP_DIR/"*.tar.gz 2>/dev/null || true
     chmod 600 "$BACKUP_DIR/"*.sha256 2>/dev/null || true
 
+    # Encrypt before anything leaves this machine. Local archives stay plain by
+    # default: they are already behind umask 0077 on the operator's own server,
+    # and the threat this addresses is a third-party remote.
+    if [[ "${ENCRYPT_BACKUP:-false}" == true ]]; then
+        encrypt_backup_archive || return 1
+    elif [[ -n "${RCLONE_REMOTE:-}" && "${NO_ENCRYPT:-false}" != true ]]; then
+        warn_unencrypted_upload
+    fi
+
     log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days (--keep-days)..."
     rm -rf "$BACKUP_PATH"
     # -maxdepth 1 keeps the prune out of backups/pre-restore/ and backups/pre-upgrade/.
     # Those are rescue copies kept by count, not by age — a prune that eats them
     # defeats the point of taking them.
     find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.tar.gz" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.tar.gz.gpg" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
     find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sha256" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
     find "$BACKUP_DIR" -maxdepth 1 -type d -name 'backup_*' -empty -exec rmdir {} \;
     log INFO "Removed any empty backup_<timestamp> folders"
     return 0
+}
+
+################################################################################
+# ENCRYPTION_GRACE_RELEASE
+# The release in which encryption stops being optional for uploads. Named in the
+# warning so nobody is surprised by it, per D18.
+################################################################################
+readonly ENCRYPTION_GRACE_RELEASE="v3.5.0"
+
+################################################################################
+# backup_passphrase()
+# Description:
+#     Resolve the passphrase for archive encryption.
+#
+# Behaviors:
+#     - Prefers BACKUP_PASSPHRASE from the environment. That keeps the key off
+#       the machine holding the data it protects.
+#     - Falls back to BACKUP_PASSPHRASE in .env, with a WARN that states the
+#       limit plainly rather than implying more protection than it gives.
+#     - Never generates one. A backup encrypted with a key the operator does not
+#       hold is not a backup.
+#
+# Output:
+#     Prints the passphrase to stdout.
+#
+# Returns:
+#     0 if resolved; 1 otherwise.
+################################################################################
+backup_passphrase() {
+    if [[ -n "${BACKUP_PASSPHRASE:-}" ]]; then
+        printf '%s' "$BACKUP_PASSPHRASE"
+        return 0
+    fi
+
+    local from_env
+    from_env="$(read_env_var "$ENV_FILE" BACKUP_PASSPHRASE 2>/dev/null || true)"
+    if [[ -n "$from_env" ]]; then
+        log WARN "Using BACKUP_PASSPHRASE from .env."
+        log WARN "That key sits on the same machine as the data it protects: it defends"
+        log WARN "against someone who can read your cloud storage, not against someone"
+        log WARN "who can read this server. Pass it in the environment to avoid that."
+        printf '%s' "$from_env"
+        return 0
+    fi
+
+    return 1
+}
+
+################################################################################
+# encrypt_backup_archive()
+# Description:
+#     Encrypt "$BACKUP_DIR/$BACKUP_FILE" in place with gpg, symmetric AES256.
+#
+# Behaviors:
+#     - gpg, not `openssl enc`: openssl's default key derivation is weak and its
+#       behaviour has changed between releases.
+#     - Removes the plaintext archive and re-points BACKUP_FILE at the .gpg.
+#     - Hard-fails when gpg is missing. Silently uploading plaintext instead
+#       would defeat the whole point.
+#
+# Returns:
+#     0 on success; 1 on any failure (caller decides whether that is fatal).
+################################################################################
+encrypt_backup_archive() {
+    local pass
+    if ! pass="$(backup_passphrase)"; then
+        log ERROR "Encryption requested but no passphrase found."
+        log ERROR "Set BACKUP_PASSPHRASE in the environment: BACKUP_PASSPHRASE=... $0 -b"
+        return 1
+    fi
+
+    require_cmd gpg || {
+        log ERROR "gpg is required to encrypt backups and is not installed."
+        log ERROR "Refusing to continue rather than writing an unencrypted archive."
+        return 1
+    }
+
+    local plain="$BACKUP_DIR/$BACKUP_FILE"
+    local enc="${plain}.gpg"
+    [[ -f "$plain" ]] || { log ERROR "Archive not found: $plain"; return 1; }
+
+    log INFO "Encrypting archive (gpg --symmetric, AES256)…"
+    if ! printf '%s' "$pass" | gpg --batch --yes --quiet \
+            --passphrase-fd 0 --pinentry-mode loopback \
+            --symmetric --cipher-algo AES256 \
+            --output "$enc" "$plain"; then
+        rm -f "$enc"
+        log ERROR "gpg failed; the archive was NOT encrypted."
+        return 1
+    fi
+
+    chmod 600 "$enc" 2>/dev/null || true
+    rm -f "$plain" "$plain.sha256"
+    BACKUP_FILE="$(basename "$enc")"
+    ( cd "$BACKUP_DIR" && sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256" ) || true
+    log INFO "Encrypted -> $BACKUP_DIR/$BACKUP_FILE"
+    log INFO "Keep BACKUP_PASSPHRASE safe. Without it this archive cannot be restored."
+    return 0
+}
+
+################################################################################
+# decrypt_backup_archive()
+# Description:
+#     Decrypt a .gpg archive next to itself and re-point TARGET_RESTORE_FILE.
+#
+# Returns:
+#     0 on success or when the file is not encrypted; 1 on failure.
+################################################################################
+decrypt_backup_archive() {
+    [[ "$TARGET_RESTORE_FILE" == *.gpg ]] || return 0
+
+    local pass
+    if ! pass="$(backup_passphrase)"; then
+        log ERROR "This archive is encrypted and no passphrase was provided."
+        log ERROR "Re-run with BACKUP_PASSPHRASE set in the environment."
+        return 1
+    fi
+    require_cmd gpg || { log ERROR "gpg is required to decrypt this archive."; return 1; }
+
+    local out="${TARGET_RESTORE_FILE%.gpg}"
+    log INFO "Decrypting archive…"
+    if ! printf '%s' "$pass" | gpg --batch --yes --quiet \
+            --passphrase-fd 0 --pinentry-mode loopback \
+            --decrypt --output "$out" "$TARGET_RESTORE_FILE"; then
+        rm -f "$out"
+        log ERROR "Decryption failed. Wrong passphrase, or the archive is damaged."
+        return 1
+    fi
+    chmod 600 "$out" 2>/dev/null || true
+    TARGET_RESTORE_FILE="$out"
+    log INFO "Decrypted -> $out"
+    return 0
+}
+
+################################################################################
+# warn_unencrypted_upload()
+# Description:
+#     Say plainly what an unencrypted upload puts in someone else's storage, and
+#     name the release that stops allowing it.
+################################################################################
+warn_unencrypted_upload() {
+    log WARN "─────────────────────────────────────────────────────────────"
+    log WARN "This archive is being uploaded UNENCRYPTED."
+    log WARN "It contains .env (N8N_ENCRYPTION_KEY, database and Redis passwords)"
+    log WARN "and a full PostgreSQL dump. Whoever can read that remote can decrypt"
+    log WARN "every credential stored in this n8n instance."
+    log WARN ""
+    log WARN "Fix: BACKUP_PASSPHRASE=... $0 -b --encrypt -s <remote>"
+    log WARN "Encryption becomes mandatory for uploads in ${ENCRYPTION_GRACE_RELEASE}."
+    log WARN "Pass --no-encrypt to keep this behaviour and silence this warning."
+    log WARN "─────────────────────────────────────────────────────────────"
 }
 
 ################################################################################
@@ -703,6 +864,10 @@ restore_stack() {
         log ERROR "Restore file not found: $TARGET_RESTORE_FILE (requested: $requested_spec)"
         return 1
     fi
+
+    # A .gpg archive is decrypted first, so everything downstream - including the
+    # preview and the encryption-key comparison - works on the real tarball.
+    decrypt_backup_archive || return 1
 
     log INFO "Starting restore at $DATE..."
     local restore_dir="$N8N_DIR/n8n_restore_$(date +%s)"

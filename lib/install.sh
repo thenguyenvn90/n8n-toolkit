@@ -90,6 +90,12 @@ copy_templates_for_mode() {
         unset owner_hash
     fi
 
+    # Grafana alert delivery. The provisioned rules have good thresholds; they
+    # just had nowhere to fire to, so every one of them evaluated into a void.
+    if [[ -n "${ALERT_CHANNEL:-}" ]]; then
+        provision_alert_channel "$ALERT_CHANNEL" "$ALERT_TARGET" || exit 1
+    fi
+
     # Rotate SECRETS in env if missing/default
     rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
     rotate_or_generate_secret "$ENV_FILE" N8N_RUNNERS_AUTH_TOKEN   16 "CHANGE_ME_BASE64_16_BYTES"
