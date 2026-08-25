@@ -2258,11 +2258,28 @@ END
 ################################################################################
 safe_wipe_target_dir() {
     local tgt="$N8N_DIR"
-    [[ -d "$tgt" ]] || { log INFO "Target dir not found: $tgt (skip)"; return 0; }
 
     local abs_tgt abs_script
     abs_tgt="$(readlink -f "$tgt" 2>/dev/null || echo "$tgt")"
     abs_script="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || echo "$SCRIPT_DIR")"
+
+    # Path guards run BEFORE the existence check, so a dangerous target is
+    # refused whether or not it happens to exist on this host.
+    #
+    # The self-deletion guard below does not catch abs_tgt="/" - the glob
+    # becomes "//*", which no ordinary path matches - so "-d /" would have
+    # expanded to "rm -rf /*" while running as root. Depth is counted from the
+    # resolved path, so symlink tricks do not get around it.
+    case "$abs_tgt" in
+        ""|"/"|"//") log ERROR "Refusing to wipe filesystem root: '$abs_tgt'"; return 1 ;;
+    esac
+    local slashes="${abs_tgt//[!\/]/}"
+    if (( ${#slashes} < 2 )); then
+        log ERROR "Refusing to wipe top-level directory: '$abs_tgt' (use a nested path such as /home/n8n)"
+        return 1
+    fi
+
+    [[ -d "$abs_tgt" ]] || { log INFO "Target dir not found: $tgt (skip)"; return 0; }
 
     if [[ "$abs_script" == "$abs_tgt" || "$abs_script" == "$abs_tgt"/* ]]; then
         log WARN "Script directory is inside target dir; skipping directory wipe to avoid self-deletion."
@@ -2271,7 +2288,7 @@ safe_wipe_target_dir() {
 
     log WARN "Wiping contents of $abs_tgt …"
     shopt -s dotglob nullglob
-    rm -rf -- "${abs_tgt}/"* "${abs_tgt}"/.[!.]* "${abs_tgt}"/..?* 2>/dev/null || true
+    rm -rf -- "${abs_tgt:?}/"* "${abs_tgt:?}"/.[!.]* "${abs_tgt:?}"/..?* 2>/dev/null || true
     shopt -u dotglob nullglob
     log INFO "Target directory contents removed."
 }

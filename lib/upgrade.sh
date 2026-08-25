@@ -53,6 +53,14 @@ upgrade_stack() {
     log INFO "Updating .env with ${tag_var}=$target_version"
     upsert_env_var "$tag_var" "$target_version" "$ENV_FILE"
 
+    local snap_dir
+    if snap_dir="$(snapshot_current_state pre-upgrade)"; then
+        log INFO "Pre-upgrade snapshot: $snap_dir"
+        log INFO "Roll back with: n8n_manager.sh -r <archive>  (config copy is in that directory)"
+    else
+        log WARN "Pre-upgrade snapshot failed; continuing without a rescue copy."
+    fi
+
     log INFO "Stopping and removing existing containers..."
     compose down --remove-orphans || true
 
