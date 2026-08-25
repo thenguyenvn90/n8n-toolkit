@@ -41,10 +41,26 @@ jobs:
           docker compose version
           ./n8n_manager.sh --self-version
 
+      - name: Pick an older n8n tag to install
+        # The upgrade step below must be a REAL version change. Installing
+        # latest and then "upgrading" to latest is a forced redeploy, which
+        # would have passed even with the #4 bug present.
+        run: |
+          tags="$(curl -fsS --retry 3 \
+            'https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100' \
+            | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr)"
+          from="$(echo "$tags" | sed -n '6p')"
+          to="$(echo "$tags" | sed -n '1p')"
+          test -n "$from" && test -n "$to" && [ "$from" != "$to" ]
+          echo "FROM_TAG=$from" >> "$GITHUB_ENV"
+          echo "TO_TAG=$to" >> "$GITHUB_ENV"
+          echo "will install $from and upgrade to $to"
+
       - name: Install (--local, self-signed TLS, no public DNS)
         run: |
           sudo ./n8n_manager.sh --install --local \
             --mode "${{ matrix.mode }}" \
+            -v "$FROM_TAG" \
             -d "$N8N_DIR"
 
       - name: The local overlay is in place and production config is untouched
@@ -116,10 +132,19 @@ jobs:
           sudo docker compose --project-directory "$N8N_DIR" logs --tail 80 || true
           exit 1
 
-      - name: Upgrade, and it leaves a pre-upgrade snapshot behind
+      - name: Upgrade to a genuinely newer version
+        # The #4 failure mode end to end: the scripts write the tag into .env,
+        # and the running container must actually be on it afterwards.
         run: |
-          sudo ./n8n_manager.sh -u -f -d "$N8N_DIR"
+          sudo ./n8n_manager.sh -u -v "$TO_TAG" -d "$N8N_DIR"
           sudo test -d "$N8N_DIR/backups/pre-upgrade"
+
+          want="$(sudo grep -E '^N8N_IMAGE_TAG=' "$N8N_DIR/.env" | cut -d= -f2)"
+          got="$(sudo docker ps --format '{{.Image}}' | grep -m1 'n8nio/n8n' | sed 's/.*://')"
+          echo "installed $FROM_TAG, asked for $TO_TAG, .env says '$want', running '$got'"
+          [ "$want" = "$TO_TAG" ]
+          [ "$got"  = "$TO_TAG" ]
+          [ "$got" != "$FROM_TAG" ]
 
       - name: Workers expose metrics under their own job label
         if: matrix.mode == 'queue'
