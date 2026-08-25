@@ -83,6 +83,8 @@ DO_RESTORE=false
 DO_CLEANUP=false
 DO_AVAILABLE=false
 DO_DOCTOR=false
+# 0 unless --doctor found something that failed.
+DOCTOR_EXIT_CODE=0
 # Cleanup mode: safe (default) | all
 CLEANUP_MODE="safe"
 
@@ -553,11 +555,19 @@ main() {
         list_available_versions
     elif ${DO_DOCTOR:-false}; then
         ensure_prereqs
-        doctor_stack
+        # A FAIL verdict is a finding, not a crash. Collecting it with || keeps
+        # the ERR trap (and its stack trace) out of a perfectly normal report.
+        doctor_stack || DOCTOR_EXIT_CODE=1
     fi
 
     # post-run housekeeping
     find "$LOG_DIR" -type f -mtime +$LOG_KEEP_DAYS -delete || true
+
+    # --doctor reports its verdict through the exit code: 0 clean, 1 has failures.
+    return "${DOCTOR_EXIT_CODE:-0}"
 }
 
-main "$@"
+# `|| exit` rather than a bare call: main returns 1 on a --doctor FAIL verdict,
+# and a bare failing command at top level would fire the ERR trap and print a
+# stack trace for what is a normal, reportable result.
+main "$@" || exit $?
