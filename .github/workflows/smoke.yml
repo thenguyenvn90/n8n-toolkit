@@ -1,0 +1,172 @@
+name: Smoke
+
+# The bats suite stubs docker, so it cannot catch a mismatch between what the
+# scripts write into .env and what the shipped compose templates read — that is
+# exactly how the regression behind #4 shipped green. This brings a real stack
+# up on *.localhost and walks the lifecycle.
+#
+# Slow and pull-heavy, so it runs on PRs into main and nightly, not on every
+# push. Needs --local, which is why it could not exist before that landed.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lifecycle:
+    name: ${{ matrix.mode }} mode lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [single, queue]
+
+    env:
+      N8N_DIR: /home/runner/n8n-smoke-${{ matrix.mode }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the versions this run is pinned to
+        run: |
+          docker --version
+          docker compose version
+          ./n8n_manager.sh --self-version
+
+      - name: Pick an older n8n tag to install
+        # The upgrade step below must be a REAL version change. Installing
+        # latest and then "upgrading" to latest is a forced redeploy, which
+        # would have passed even with the #4 bug present.
+        run: |
+          tags="$(curl -fsS --retry 3 \
+            'https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100' \
+            | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr)"
+          # One page of 100 tags yields only a handful of pure-semver names -
+          # the rest are arch and sha variants (2.37.1-amd64, 2.37.1-<sha>-pc,
+          # ...). So take the OLDEST available rather than a fixed offset.
+          echo "$tags"
+          to="$(echo "$tags" | head -n1)"
+          from="$(echo "$tags" | tail -n1)"
+          if [ -z "$from" ] || [ -z "$to" ] || [ "$from" = "$to" ]; then
+            echo "need at least two distinct stable tags, got: from='$from' to='$to'"
+            exit 1
+          fi
+          echo "FROM_TAG=$from" >> "$GITHUB_ENV"
+          echo "TO_TAG=$to" >> "$GITHUB_ENV"
+          echo "will install $from and upgrade to $to"
+
+      - name: Install (--local, self-signed TLS, no public DNS)
+        run: |
+          sudo ./n8n_manager.sh --install --local \
+            --mode "${{ matrix.mode }}" \
+            -v "$FROM_TAG" \
+            -d "$N8N_DIR"
+
+      - name: The local overlay is in place and production config is untouched
+        run: |
+          test -f "$N8N_DIR/docker-compose.local.yml"
+          # No ACME anywhere in the merged config
+          cd "$N8N_DIR"
+          sudo docker compose -f docker-compose.yml -f docker-compose.local.yml \
+            --env-file .env config > /tmp/merged.yml
+          ! grep -q "certresolver" /tmp/merged.yml
+          ! grep -q "acme" /tmp/merged.yml
+
+      - name: n8n answers through Traefik
+        run: |
+          for i in $(seq 1 30); do
+            code="$(curl -sk -o /dev/null -w '%{http_code}' \
+                     --resolve "n8n.localhost:443:127.0.0.1" \
+                     https://n8n.localhost/healthz || true)"
+            echo "attempt $i -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          echo "n8n never answered through Traefik"
+          sudo docker ps -a
+          sudo docker compose --project-directory "$N8N_DIR" logs --tail 80 || true
+          exit 1
+
+      - name: The image tag actually deployed is the one .env asks for
+        # This is the #4 regression, checked end to end rather than by grep.
+        run: |
+          want="$(sudo grep -E '^N8N_IMAGE_TAG=' "$N8N_DIR/.env" | cut -d= -f2)"
+          got="$(sudo docker ps --format '{{.Image}}' | grep -m1 'n8nio/n8n' | sed 's/.*://')"
+          echo "env asks for '$want', running '$got'"
+          [ -n "$want" ] && [ "$want" = "$got" ]
+
+      - name: Backup
+        run: |
+          sudo ./n8n_manager.sh -b -f -d "$N8N_DIR"
+          sudo ls -la "$N8N_DIR/backups"
+          sudo test -n "$(sudo find "$N8N_DIR/backups" -maxdepth 1 -name 'n8n_backup_*.tar.gz' -print -quit)"
+
+      - name: Restore refuses without a confirmation
+        # No TTY here, so an unattended restore must refuse rather than assume
+        # yes. This is the guard from #7.
+        run: |
+          archive="$(sudo find "$N8N_DIR/backups" -maxdepth 1 -name 'n8n_backup_*.tar.gz' -print -quit)"
+          if sudo ./n8n_manager.sh -r "$archive" -d "$N8N_DIR"; then
+            echo "restore proceeded without -f and without a terminal — the guard is not working"
+            exit 1
+          fi
+          echo "refused, as intended"
+
+      - name: Restore with -f, and it leaves a rescue snapshot behind
+        run: |
+          archive="$(sudo find "$N8N_DIR/backups" -maxdepth 1 -name 'n8n_backup_*.tar.gz' -print -quit)"
+          sudo ./n8n_manager.sh -r "$archive" -f -d "$N8N_DIR"
+          sudo test -d "$N8N_DIR/backups/pre-restore"
+          sudo find "$N8N_DIR/backups/pre-restore" -name '.env.bak' | grep -q .
+
+      - name: n8n answers again after the restore
+        run: |
+          for i in $(seq 1 30); do
+            code="$(curl -sk -o /dev/null -w '%{http_code}' \
+                     --resolve "n8n.localhost:443:127.0.0.1" \
+                     https://n8n.localhost/healthz || true)"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          sudo docker compose --project-directory "$N8N_DIR" logs --tail 80 || true
+          exit 1
+
+      - name: Upgrade to a genuinely newer version
+        # The #4 failure mode end to end: the scripts write the tag into .env,
+        # and the running container must actually be on it afterwards.
+        run: |
+          sudo ./n8n_manager.sh -u -v "$TO_TAG" -d "$N8N_DIR"
+          sudo test -d "$N8N_DIR/backups/pre-upgrade"
+
+          want="$(sudo grep -E '^N8N_IMAGE_TAG=' "$N8N_DIR/.env" | cut -d= -f2)"
+          got="$(sudo docker ps --format '{{.Image}}' | grep -m1 'n8nio/n8n' | sed 's/.*://')"
+          echo "installed $FROM_TAG, asked for $TO_TAG, .env says '$want', running '$got'"
+          [ "$want" = "$TO_TAG" ]
+          [ "$got"  = "$TO_TAG" ]
+          [ "$got" != "$FROM_TAG" ]
+
+      - name: Workers expose metrics under their own job label
+        if: matrix.mode == 'queue'
+        run: |
+          cid="$(sudo docker ps --filter "name=worker" --format '{{.ID}}' | head -1)"
+          test -n "$cid"
+          sudo docker exec "$cid" wget -qO- http://localhost:5678/metrics | head -5
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo docker ps -a || true
+          sudo docker compose --project-directory "$N8N_DIR" logs --tail 200 || true
+          sudo tail -n 200 "$N8N_DIR"/logs/*.log || true
+
+      - name: Tear down
+        if: always()
+        run: sudo ./n8n_manager.sh -c all -d "$N8N_DIR" <<< "yes" || true

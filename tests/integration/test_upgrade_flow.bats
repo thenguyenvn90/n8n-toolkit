@@ -131,7 +131,8 @@ _run_upgrade() {
         N8N_VERSION='1.100.0'
         FORCE_FLAG=false MONITORING=false
 
-        get_current_n8n_version() { echo '1.108.0'; }
+        # Mirrors a real instance: report whatever tag is currently deployed.
+        get_current_n8n_version() { local v; v=\"\$(read_env_var \"\$ENV_FILE\" N8N_IMAGE_TAG 2>/dev/null || true)\"; [[ -n \"\$v\" ]] && echo \"\$v\" || echo '1.108.0'; }
         docker_up_check()         { return 0; }
         post_up_tls_checks()      { return 0; }
         ensure_monitoring_auth()  { return 0; }
@@ -167,7 +168,8 @@ _run_upgrade() {
         N8N_VERSION='1.100.0'
         FORCE_FLAG=true MONITORING=false
 
-        get_current_n8n_version() { echo '1.108.0'; }
+        # Mirrors a real instance: report whatever tag is currently deployed.
+        get_current_n8n_version() { local v; v=\"\$(read_env_var \"\$ENV_FILE\" N8N_IMAGE_TAG 2>/dev/null || true)\"; [[ -n \"\$v\" ]] && echo \"\$v\" || echo '1.108.0'; }
         docker_up_check()         { return 0; }
         post_up_tls_checks()      { return 0; }
         ensure_monitoring_auth()  { return 0; }
@@ -206,9 +208,13 @@ _run_upgrade() {
         LOG_FILE=\"\$N8N_DIR/logs/upgrade_test.log\"
         mkdir -p \"\$N8N_DIR/logs\"
         N8N_VERSION='latest'   # stub resolves to 1.108.0
+        # Put .env on that same tag so already-on-target is genuinely true:
+        # get_current_n8n_version now reads the deployed tag, as a real one does.
+        upsert_env_var N8N_IMAGE_TAG 1.108.0 \"\$ENV_FILE\"
         FORCE_FLAG=false MONITORING=false
 
-        get_current_n8n_version() { echo '1.108.0'; }
+        # Mirrors a real instance: report whatever tag is currently deployed.
+        get_current_n8n_version() { local v; v=\"\$(read_env_var \"\$ENV_FILE\" N8N_IMAGE_TAG 2>/dev/null || true)\"; [[ -n \"\$v\" ]] && echo \"\$v\" || echo '1.108.0'; }
         docker_up_check()         { return 0; }
         post_up_tls_checks()      { return 0; }
         ensure_monitoring_auth()  { return 0; }
@@ -309,4 +315,38 @@ EOF
     source "$REPO_ROOT/lib/common.sh" 2>/dev/null
     tag="$(read_env_var "$N8N_DIR/.env" N8N_IMAGE_TAG || true)"
     [ "$tag" = "1.108.0" ]
+}
+
+# ---------------------------------------------------------------------------
+# The upgrade must actually take
+#
+# Found by the lifecycle smoke test: upgrading 2.36.6 -> 2.37.1 wrote the new
+# tag into .env and reported success while the container stayed on 2.36.6.
+# load_env_file() sources .env with allexport, so the OLD tag remained exported
+# in the process, and Docker Compose resolves shell environment variables ahead
+# of --env-file. Verified empirically:
+#     TAG=shellwins docker compose --env-file .env config   -> alpine:shellwins
+# ---------------------------------------------------------------------------
+
+@test "upgrade exports the new image tag, not just writes it to .env" {
+    grep -q 'export "\${tag_var}=\${target_version}"' "$REPO_ROOT/lib/upgrade.sh"
+}
+
+
+# The Compose precedence this rests on (shell env beats --env-file) is
+# exercised end to end by .github/workflows/smoke.yml, which upgrades a real
+# stack between two published tags. A unit test for it needs a bind-mountable
+# temp dir, which is not portable enough to be worth it.
+@test "upgrade refuses to report success when the running version did not change" {
+    grep -q 'Upgrade did not take' "$REPO_ROOT/lib/upgrade.sh"
+    # and the summary prints the verified version, not a fresh unchecked read
+    grep -q 'box_line "Upgraded Version:" *"\$running_version"' "$REPO_ROOT/lib/upgrade.sh"
+}
+
+@test "snapshot_current_state publishes its path out of band, not on stdout" {
+    # log() writes INFO to stdout, so a command substitution captured log lines
+    # as part of the path: "Pre-upgrade snapshot: [INFO] A full backup exists..."
+    grep -q 'SNAPSHOT_DIR="\$dir"' "$REPO_ROOT/lib/backup.sh"
+    run grep -c "printf '%s..n' \"\$dir\"" "$REPO_ROOT/lib/backup.sh"
+    [ "$output" -eq 0 ]
 }
