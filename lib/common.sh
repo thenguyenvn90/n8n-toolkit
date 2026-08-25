@@ -577,6 +577,15 @@ compose() {
 
     local -a flags=( --project-directory "$N8N_DIR" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" )
 
+    # Local mode is recorded by the presence of the overlay, not by a flag the
+    # caller has to remember. Install copies it only for --local, so every later
+    # command (upgrade, backup, cleanup) stays consistent with how the stack was
+    # brought up.
+    local local_overlay="$N8N_DIR/docker-compose.local.yml"
+    if [[ -f "$local_overlay" ]]; then
+        flags+=( -f "$local_overlay" )
+    fi
+
     local compose_project_name
     compose_project_name="$(read_env_var "$ENV_FILE" COMPOSE_PROJECT_NAME || true)"
     if [[ -n "$compose_project_name" ]]; then
@@ -1467,6 +1476,11 @@ check_domain() {
 #   0 if all FQDNs pass `check_domain`; 1 if any fail.
 ################################################################################
 preflight_dns_checks() {
+    if [[ "${LOCAL_MODE:-false}" == true ]]; then
+        log INFO "Local mode: skipping the public DNS check (*.localhost has no A record by design)."
+        return 0
+    fi
+
     local errs=0 fq
     while IFS= read -r fq; do
         [[ -z "$fq" ]] && continue
@@ -1498,6 +1512,11 @@ preflight_dns_checks() {
 #   fails verification.
 ################################################################################
 post_up_tls_checks() {
+    if [[ "${LOCAL_MODE:-false}" == true ]]; then
+        log INFO "Local mode: Traefik is serving its self-signed certificate; skipping TLS verification."
+        log INFO "Your browser will warn about the certificate. That is expected."
+        return 0
+    fi
     local strict="${STRICT_TLS_ALL:-false}" errs=0 fq
     while IFS= read -r fq; do
         [[ -z "$fq" ]] && continue

@@ -43,6 +43,19 @@ copy_templates_for_mode() {
     [[ -f "$N8N_DIR/.env" ]] && cp -a "$N8N_DIR/.env" "$N8N_DIR/.env.bak.$(date +%F_%H-%M-%S)"
     cp -a "$env_src" "$N8N_DIR/.env"
 
+    # The local overlay is copied only for --local, and removed otherwise, so a
+    # directory that was once local does not stay local after a normal reinstall.
+    if [[ "${LOCAL_MODE:-false}" == true ]]; then
+        if [[ ! -f "$src_dir/docker-compose.local.yml" ]]; then
+            log ERROR "--local requested but docker-compose.local.yml is missing from $src_dir"
+            exit 1
+        fi
+        cp -a "$src_dir/docker-compose.local.yml" "$N8N_DIR/docker-compose.local.yml"
+        log INFO "Local mode: self-signed TLS, no Let's Encrypt."
+    else
+        rm -f "$N8N_DIR/docker-compose.local.yml"
+    fi
+
     # Update .env
     log INFO "Updating DOMAIN=$DOMAIN in $ENV_FILE"
     upsert_env_var "DOMAIN" "$DOMAIN" "$ENV_FILE"
