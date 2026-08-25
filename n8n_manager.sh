@@ -563,11 +563,12 @@ main() {
     # post-run housekeeping
     find "$LOG_DIR" -type f -mtime +$LOG_KEEP_DAYS -delete || true
 
-    # --doctor reports its verdict through the exit code: 0 clean, 1 has failures.
-    return "${DOCTOR_EXIT_CODE:-0}"
+    # exit, not return, and NOT `main "$@" || exit $?` at the call site: wrapping
+    # main in a || list suspends errexit inside it, so a genuine failure in
+    # restore/upgrade would stop aborting and the script would exit 0. exit here
+    # gives --doctor its verdict (0 clean, 1 has failures) without touching the
+    # error handling every other action depends on. exit does not fire the ERR trap.
+    exit "${DOCTOR_EXIT_CODE:-0}"
 }
 
-# `|| exit` rather than a bare call: main returns 1 on a --doctor FAIL verdict,
-# and a bare failing command at top level would fire the ERR trap and print a
-# stack trace for what is a normal, reportable result.
-main "$@" || exit $?
+main "$@"

@@ -172,3 +172,29 @@ setup() {
     run bash "$REPO_ROOT/n8n_manager.sh" --doctor --backup
     [ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Exit-code plumbing
+#
+# The first attempt wrapped the entrypoint as `main "$@" || exit $?` to keep the
+# ERR trap quiet on a FAIL verdict. That suspends errexit INSIDE main, so a real
+# failure in restore or upgrade stopped aborting and the script exited 0 - the
+# smoke test caught it when an unattended restore refused correctly and the
+# script still reported success.
+# ---------------------------------------------------------------------------
+
+@test "the entrypoint is a bare call, so errexit still applies inside main" {
+    run tail -n 3 "$REPO_ROOT/n8n_manager.sh"
+    [[ "$output" == *'main "$@"'* ]]
+    [[ "$output" != *'main "$@" || exit'* ]]
+}
+
+@test "main exits with the doctor verdict rather than returning it" {
+    grep -q 'exit "\${DOCTOR_EXIT_CODE:-0}"' "$REPO_ROOT/n8n_manager.sh"
+    run grep -c 'return "\${DOCTOR_EXIT_CODE:-0}"' "$REPO_ROOT/n8n_manager.sh"
+    [ "$output" -eq 0 ]
+}
+
+@test "doctor_stack is collected with || so the ERR trap stays quiet" {
+    grep -q 'doctor_stack || DOCTOR_EXIT_CODE=1' "$REPO_ROOT/n8n_manager.sh"
+}
