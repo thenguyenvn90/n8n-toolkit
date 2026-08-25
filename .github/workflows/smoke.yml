@@ -153,6 +153,31 @@ jobs:
           [ "$got"  = "$TO_TAG" ]
           [ "$got" != "$FROM_TAG" ]
 
+      - name: Doctor runs clean on a fresh install
+        run: |
+          sudo ./n8n_manager.sh --doctor -d "$N8N_DIR" | tee /tmp/doctor.txt
+          # A freshly installed stack must not report a single FAIL.
+          grep -q "n8n-toolkit doctor" /tmp/doctor.txt
+          grep -qE "doctor . (PASS|WARN)" /tmp/doctor.txt
+          ! grep -qE "doctor . FAIL" /tmp/doctor.txt
+          # and the paste block must be there, with no secret in it
+          grep -q -- "--- paste this into your issue ---" /tmp/doctor.txt
+          key="$(sudo grep -E '^N8N_ENCRYPTION_KEY=' "$N8N_DIR/.env" | cut -d= -f2)"
+          test -n "$key"
+          ! grep -qF "$key" /tmp/doctor.txt
+
+      - name: Doctor fails an instance with a placeholder encryption key
+        run: |
+          sudo cp "$N8N_DIR/.env" /tmp/env.good
+          sudo sed -i 's|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=CHANGE_ME_BASE64_32_BYTES|' "$N8N_DIR/.env"
+          if sudo ./n8n_manager.sh --doctor -d "$N8N_DIR" | tee /tmp/doctor_bad.txt; then
+            echo "doctor exited 0 on a placeholder encryption key"
+            sudo cp /tmp/env.good "$N8N_DIR/.env"
+            exit 1
+          fi
+          grep -q "still the shipped placeholder" /tmp/doctor_bad.txt
+          sudo cp /tmp/env.good "$N8N_DIR/.env"
+
       - name: Workers expose metrics under their own job label
         if: matrix.mode == 'queue'
         run: |

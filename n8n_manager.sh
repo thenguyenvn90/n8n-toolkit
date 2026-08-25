@@ -55,7 +55,7 @@ TOOLKIT_VERSION="3.2.0"
 # Load shared helpers
 LIB_DIR="$SCRIPT_DIR/lib"
 # Source order is load-bearing: common.sh must come first (all other libs depend on its functions and globals)
-for _lib in common.sh install.sh upgrade.sh backup.sh cleanup.sh; do
+for _lib in common.sh install.sh upgrade.sh backup.sh cleanup.sh doctor.sh; do
     _path="$LIB_DIR/$_lib"
     if [[ -f "$_path" ]]; then
         # shellcheck disable=SC1090
@@ -82,6 +82,7 @@ DO_BACKUP=false
 DO_RESTORE=false
 DO_CLEANUP=false
 DO_AVAILABLE=false
+DO_DOCTOR=false
 # Cleanup mode: safe (default) | all
 CLEANUP_MODE="safe"
 
@@ -193,6 +194,10 @@ Actions (choose exactly one):
 
   -c, --cleanup [safe|all]  Stop stack & remove resources (preview; confirm in 'all')
 
+      --doctor
+        Diagnose the instance: health, security audit, legacy config.
+        Read-only. Ends with a masked block to paste into a bug report.
+
 Options:
   --mode <single|queue>     (install only; default: single)
   -v, --version <tag>       Target n8n version (default: latest stable)
@@ -301,7 +306,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,keep-days:,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,doctor,keep-days:,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -369,6 +374,10 @@ parse_args() {
             --mode)
                 INSTALL_MODE="$2"
                 shift 2
+                ;;
+            --doctor)
+                DO_DOCTOR=true
+                shift
                 ;;
             --local)
                 LOCAL_MODE=true
@@ -443,6 +452,7 @@ parse_args() {
     $DO_RESTORE   && ((count+=1))
     $DO_CLEANUP   && ((count+=1))
     $DO_AVAILABLE && ((count+=1))
+    ${DO_DOCTOR:-false} && ((count+=1))
     if (( count != 1 )); then
         log ERROR "Choose exactly one action."
         usage
@@ -541,6 +551,9 @@ main() {
         cleanup_stack
     elif $DO_AVAILABLE; then
         list_available_versions
+    elif ${DO_DOCTOR:-false}; then
+        ensure_prereqs
+        doctor_stack
     fi
 
     # post-run housekeeping
