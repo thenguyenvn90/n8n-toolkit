@@ -136,6 +136,17 @@ SMTP_PASS="${SMTP_PASS:-}"
 EMAIL_SENT=false
 EMAIL_ATTEMPTED=false
 
+# Backup encryption. Opt-in in v3.3.0, enforced on upload from v3.5.0.
+# The passphrase comes from BACKUP_PASSPHRASE in the environment.
+# Grafana alert delivery. The rules already exist and their thresholds are
+# good; what was missing is somewhere for them to fire TO.
+ALERT_CHANNEL=""
+ALERT_TARGET=""
+
+ENCRYPT_BACKUP=false
+NO_ENCRYPT=false
+BACKUP_PASSPHRASE="${BACKUP_PASSPHRASE:-}"
+
 # rclone remote path (e.g. gdrive:/n8n-backups)
 RCLONE_REMOTE=""
 RCLONE_FLAGS=(--transfers=4 --checkers=8 --retries=5 --low-level-retries=10 --contimeout=30s --timeout=5m --retries-sleep=10s)
@@ -207,6 +218,12 @@ Options:
   -d, --dir <path>          Target n8n directory (default: /home/n8n)
   -l, --log-level <LEVEL>   DEBUG | INFO (default) | WARN | ERROR
   -f, --force               Upgrade: allow downgrade or redeploy; Backup: force even if unchanged
+      --alerts <channel>    Deliver Grafana alerts (install-only). Currently: telegram
+      --alert-target <t>    Telegram: '<bot-token>:<chat-id>'
+      --encrypt             Encrypt the backup archive (gpg --symmetric, AES256)
+                            Passphrase from BACKUP_PASSPHRASE in the environment
+                            Required for uploads from v3.5.0; warns until then
+      --no-encrypt          Upload without encryption, and mean it
       --keep-days <N>       Days to keep backups, local and remote (default: 7)
                             Logs are pruned after 7 days regardless
   -e, --email-to <email>    Send notifications to this address (requires SMTP_USER/SMTP_PASS env)
@@ -308,7 +325,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,doctor,keep-days:,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,local,doctor,encrypt,no-encrypt,alerts:,alert-target:,keep-days:,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -379,6 +396,22 @@ parse_args() {
                 ;;
             --doctor)
                 DO_DOCTOR=true
+                shift
+                ;;
+            --alerts)
+                ALERT_CHANNEL="$2"
+                shift 2
+                ;;
+            --alert-target)
+                ALERT_TARGET="$2"
+                shift 2
+                ;;
+            --encrypt)
+                ENCRYPT_BACKUP=true
+                shift
+                ;;
+            --no-encrypt)
+                NO_ENCRYPT=true
                 shift
                 ;;
             --local)
@@ -466,6 +499,17 @@ parse_args() {
     if [[ ! "$DAYS_TO_KEEP" =~ ^[0-9]+$ ]] || (( DAYS_TO_KEEP < 1 )); then
         log ERROR "--keep-days must be a positive integer (got '$DAYS_TO_KEEP')."
         exit 2
+    fi
+
+    if [[ -n "$ALERT_CHANNEL" ]]; then
+        case "$ALERT_CHANNEL" in
+            telegram) ;;
+            *) log ERROR "--alerts supports 'telegram' (got '$ALERT_CHANNEL')."; exit 2 ;;
+        esac
+        if [[ -z "$ALERT_TARGET" ]]; then
+            log ERROR "--alerts needs --alert-target '<bot-token>:<chat-id>'."
+            exit 2
+        fi
     fi
 
     # --local runs on *.localhost, so a domain is neither needed nor meaningful.

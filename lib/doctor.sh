@@ -191,11 +191,26 @@ doctor_check_security() {
     fi
 
     # Backups carry .env and a full database dump.
-    local remote
+    local remote enc_archives
     remote="$(read_env_var "$ENV_FILE" RCLONE_REMOTE || true)"
     if [[ -n "${RCLONE_REMOTE:-}${remote:-}" ]]; then
-        doctor_record WARN "$sec" "Backups are uploaded unencrypted" \
-            "The archive holds .env and a full DB dump. Encryption lands in v3.3.0; see the plan."
+        enc_archives="$(find "$BACKUP_DIR" -maxdepth 1 -name '*.tar.gz.gpg' -print -quit 2>/dev/null || true)"
+        if [[ -n "$enc_archives" ]]; then
+            doctor_record PASS "$sec" "Backups are encrypted before upload" ""
+        else
+            doctor_record WARN "$sec" "Backups are uploaded unencrypted" \
+                "The archive holds .env and a full DB dump. Use --encrypt with BACKUP_PASSPHRASE; required from v3.5.0."
+        fi
+    fi
+
+    # Alert rules with nowhere to fire are decoration.
+    if [[ -d "$N8N_DIR/monitoring/grafana/provisioning/alerts" ]]; then
+        if [[ -f "$N8N_DIR/monitoring/grafana/provisioning/alerting/contactpoints.yaml" ]]; then
+            doctor_record PASS "$sec" "Grafana alerts have a delivery channel" ""
+        else
+            doctor_record WARN "$sec" "Grafana alert rules have no contact point" \
+                "They evaluate and notify nobody. Set one with --alerts telegram --alert-target ..."
+        fi
     fi
 }
 
