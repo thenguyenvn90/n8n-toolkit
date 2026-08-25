@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      # Gate on `error` only. The suite currently has 0 of those, so this
+      # starts green and stays honest: a new error fails the build.
+      - name: shellcheck (errors gate the build)
+        run: shellcheck --severity=error --format=gcc n8n_manager.sh lib/*.sh tests/run_tests.sh
+
+      # Warnings are reported for visibility but do not gate. Most are SC2034
+      # (unused variable), inherent to the sourced-library layout where
+      # n8n_manager.sh declares globals the libs consume.
+      - name: shellcheck (warnings, advisory)
+        continue-on-error: true
+        run: shellcheck --severity=warning --format=gcc n8n_manager.sh lib/*.sh tests/run_tests.sh
+
+  bats:
+    name: bats (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: |
+          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          sudo /tmp/bats-core/install.sh /usr/local
+          bats --version
+
+      - name: Run ${{ matrix.suite }} tests
+        run: bats --tap --recursive "tests/${{ matrix.suite }}"
