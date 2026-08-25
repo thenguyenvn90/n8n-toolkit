@@ -107,6 +107,11 @@ PROMETHEUS_FQDN=""
 BASIC_AUTH_USER=""
 BASIC_AUTH_PASS=""
 
+# Instance owner, provisioned from the environment at install time.
+# Replaces N8N_BASIC_AUTH_*, which n8n removed in 1.0.
+OWNER_EMAIL=""
+OWNER_PASSWORD=""
+
 # Backup/Restore
 TARGET_RESTORE_FILE=""
 DAYS_TO_KEEP=7
@@ -203,6 +208,9 @@ Options:
   --subdomain-prometheus <sub>        Override Prometheus subdomain (default: prometheus)
   --basic-auth-user <user>            Traefik basic auth user for Grafana/Prometheus
   --basic-auth-pass <pass>            Traefik basic auth pass for Grafana/Prometheus
+  --owner-email <email>               Create the n8n instance owner from the environment
+  --owner-password <pass>             Owner password (hashed before it is written)
+                                      Both are install-only and must be given together
 
 Examples:
   $0 -a
@@ -281,7 +289,7 @@ set_paths() {
 parse_args() {
     # NOTE: keep short/long specs in sync with usage()
     SHORT="i::uv:m:c:bad:l:r:e:ns:fh"
-    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:"
+    LONG="install::,upgrade,version:,ssl-email:,cleanup:,backup,available,dir:,log-level:,restore:,email-to:,notify-on-success,remote-name:,force,help,self-version,mode:,monitoring,expose-prometheus,subdomain-n8n:,subdomain-grafana:,subdomain-prometheus:,basic-auth-user:,basic-auth-pass:,owner-email:,owner-password:"
 
     PARSED=$(getopt --options="$SHORT" --longoptions="$LONG" --name "$0" -- "$@") || usage
     eval set -- "$PARSED"
@@ -378,6 +386,14 @@ parse_args() {
                 BASIC_AUTH_PASS="$2"
                 shift 2
                 ;;
+            --owner-email)
+                OWNER_EMAIL="$2"
+                shift 2
+                ;;
+            --owner-password)
+                OWNER_PASSWORD="$2"
+                shift 2
+                ;;
             -f|--force)
                 FORCE_FLAG=true
                 shift
@@ -410,6 +426,13 @@ parse_args() {
     if (( count != 1 )); then
         log ERROR "Choose exactly one action."
         usage
+    fi
+
+    # Owner provisioning needs both halves. One without the other silently does
+    # nothing, which is worse than refusing.
+    if [[ -n "$OWNER_EMAIL" && -z "$OWNER_PASSWORD" ]] || [[ -z "$OWNER_EMAIL" && -n "$OWNER_PASSWORD" ]]; then
+        log ERROR "--owner-email and --owner-password must be given together."
+        exit 2
     fi
 
     # Validate install mode if used
