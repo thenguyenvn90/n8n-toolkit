@@ -1,6 +1,13 @@
 # n8n-toolkit — Improvement Plan
 
-Status: proposed · Created 2026-08-25 · Baseline commit `b30b800`
+Status: **v3.1.0, v3.2.0 and v3.3.0 shipped** · Created 2026-08-25 · Baseline commit `b30b800`
+
+| Release | State | PRs |
+|---|---|---|
+| v3.1.0 — Safety | shipped | #6 #7 #8 #9 |
+| v3.2.0 — Remove the lies, remove the gate | shipped | #11 #12 #13 #14 |
+| v3.3.0 — Hardening | shipped | #16 #17 |
+| v3.5.0 — Encryption enforced | pending | — |
 
 This plan came out of a code audit plus a 30-day survey of what self-hosters actually
 struggle with. Every finding was verified in the source, not inferred from the README.
@@ -54,12 +61,19 @@ somewhere other than throughput:
 Nobody is asking for a bigger cluster. They are asking not to lose their credentials and
 not to have an upgrade take the instance down.
 
-> **Sourcing note.** The CVE identifiers, severity scores, and instance counts above come
-> from secondary reporting (vendor blogs, security press) gathered on 2026-08-25. They have
-> **not** been checked against the NVD records. That is acceptable for motivating this plan.
-> It is **not** acceptable for the CVE version check in item 12 — a wrong patch threshold
-> there makes `--doctor` report a vulnerable instance as safe. Read the NVD entries and pin
-> exact patched versions before writing that check.
+> **Sourcing note — resolved.** The figures above came from secondary reporting (vendor
+> blogs, security press) gathered on 2026-08-25, and were checked against NVD before the
+> `--doctor` version check was written. The records say:
+>
+> | CVE | CVSS | First fixed |
+> |---|---|---|
+> | CVE-2026-21858 | 10.0 | 1.121.0 |
+> | CVE-2026-25049 | 9.9 | 1.123.17 / 2.5.2 |
+> | CVE-2026-27493 | **9.0** | 1.123.22 / 2.9.3 / 2.10.1 |
+>
+> So the enforced floors are **1.123.22** and **2.10.1**. Note the correction: CVE-2026-27493
+> is **9.0**, not the 10.0 the press reporting claimed — exactly the kind of drift this note
+> existed to catch. Retrieved from services.nvd.nist.gov on 2026-08-26.
 
 ---
 
@@ -186,6 +200,49 @@ Found during the review of this plan, not the original audit. One-line fix
 (`trap 'rm -f "$pass_tmp"' RETURN`), recorded because a document that presents itself as a
 security audit cannot drop a finding it produced itself.
 
+### F12 — `safe_wipe_target_dir` could wipe the filesystem root · CRITICAL
+
+Found by the shellcheck job from #6 on its first run (`SC2115`). The self-deletion guard
+compares `$SCRIPT_DIR` against `"$abs_tgt"/*`, which cannot match when `abs_tgt` is `/` —
+the glob becomes `//*`. So `-d /` expanded to `rm -rf /*` while running as root.
+
+Fixed in #7: path guards run **before** the existence check, and reject the root and any
+top-level directory.
+
+### F13 — one page of Docker Hub tags yields ~4 usable versions · LOW
+
+`_fetch_stable_tags 100` requests 100 tags, but the page is dominated by arch and sha
+variants (`2.37.1-amd64`, `2.37.1-<sha>-pc`, …). Only **4** pure-semver names survive the
+filter, so `list_available_versions` promises the latest 5 and can only ever return 4.
+
+Not yet fixed. Surfaced while writing the smoke test, which had to take the oldest
+available tag rather than a fixed offset.
+
+### F14 — the upgrade wrote the new tag and came back on the old one · HIGH
+
+Found by the lifecycle smoke test (#14) on its first real version change:
+
+```
+installed 2.36.6, asked for 2.37.1, .env says '2.37.1', running '2.36.6'
+```
+
+`upgrade_stack` calls `load_env_file`, which sources `.env` with `allexport`, so the **old**
+tag stays exported in the process — and Docker Compose resolves shell environment variables
+ahead of `--env-file`. The stack came back on the version it was already running while
+`.env` and the summary both claimed the new one. Verified directly:
+
+```
+$ TAG=shellwins docker compose --env-file .env config    # .env has TAG=fromfile
+image: alpine:shellwins
+```
+
+Same user-visible symptom as issue #4 — *upgrade will not advance past version X* — by a
+different mechanism, and it **survived that fix**. The bats suite could never have caught
+it: it stubs docker, so the env-precedence layer does not exist there.
+
+Fixed in #14: the resolved tag is exported as well as written, and the upgrade verifies the
+running version afterwards instead of printing "successfully upgraded" above the old number.
+
 ---
 
 ## 3. What is already good — do not rebuild it
@@ -253,7 +310,7 @@ The plan's first draft was inconsistent with itself. Corrected scheme:
 Each item carries **Done when**: the bats test that must pass. An item without a passing
 named test is not done (D21).
 
-### v3.1.0 — safety
+### v3.1.0 — safety · SHIPPED
 
 Everything here closes a way to lose data or lose sight of the system. Four PRs, in this
 order:
@@ -303,7 +360,7 @@ snapshot still leaves no way back)
    - `--self-version prints a semver matching TOOLKIT_VERSION`
    - `no two provisioned dashboards share a normalized filename`
 
-### v3.2.0 — remove the lies, remove the gate
+### v3.2.0 — remove the lies, remove the gate · SHIPPED
 
 8. **Drop `N8N_BASIC_AUTH_*`** from both `.env.example` files and from
    `rotate_or_generate_secret`. Add `N8N_INSTANCE_OWNER_MANAGED_BY_ENV` with
@@ -322,7 +379,7 @@ snapshot still leaves no way back)
     → upgrade → doctor. This is the only thing that catches "compose reads variable A,
     script writes variable B". *(F5, D5)*
 
-### v3.3.0 — hardening
+### v3.3.0 — hardening · SHIPPED
 
 12. **`--doctor`.** One command, three sections — runtime health, security audit, legacy
     config — with a PASS/WARN/FAIL summary at the top and a masked copy-paste block at the
@@ -344,7 +401,7 @@ snapshot still leaves no way back)
 14. **Alert delivery.** Provision a Grafana contact point and notification policy via
     `--alerts telegram <webhook>`. Thresholds untouched. *(F10, D11)*
 
-### v3.5.0 — encryption enforced
+### v3.5.0 — encryption enforced · PENDING
 
 15. **Encrypted upload, phase 2.** Encryption becomes mandatory whenever an rclone remote
     is set; `--no-encrypt` to opt out explicitly; hard-fail when `gpg` is missing rather
@@ -357,7 +414,31 @@ additional alert rules.
 
 ---
 
-## 7. Open, not forgotten
+## 7. What execution changed
+
+The plan survived contact largely intact. Where it did not, here is what moved and why.
+
+- **F9 (duplicate dashboards) shipped in the worker-metrics PR, not the version PR.** It is
+  monitoring config, so it belongs with its test. The duplicates turned out to be
+  byte-identical *and* to carry the same Grafana `uid`, so provisioning loaded the same
+  dashboard twice.
+- **Three findings were added during execution**: F12, F13, F14 above. Two of them were
+  found by the CI this plan introduced, which is the argument for D22 (CI first) making
+  itself.
+- **`--owner-password` needed a hash, not a password.** The plan named the flag before
+  anyone read the loader; `N8N_INSTANCE_OWNER_PASSWORD_HASH` takes a pre-hashed bcrypt
+  string and n8n refuses to boot on anything else. The flag kept its name and hashes the
+  value before writing it.
+- **The `--local` cost estimate was wrong and the plan says so** (see F7). Correcting it in
+  place, rather than quietly, is why D17 chose an overlay.
+- **Two self-inflicted bugs are recorded in the history rather than squashed away**: the
+  snapshot path returned on stdout while `log()` also writes there (#14), and wrapping the
+  entrypoint in `|| exit $?` which suspended `errexit` inside `main` (#16). Both were caught
+  by the smoke test, not by review.
+
+---
+
+## 8. Open, not forgotten
 
 **Issue #1 — production forms 404.** Not reproducible against the current queue-mode
 template, which sets neither `N8N_DISABLE_PRODUCTION_MAIN_PROCESS` nor dedicated webhook
@@ -366,7 +447,7 @@ activation-time logs. Item 12 turns the question into a check anyone can run.
 
 ---
 
-## 8. Positioning
+## 9. Positioning
 
 > n8n-autoscaling makes your instance **big**. This toolkit keeps it **alive** — backups
 > that restore, upgrades with a rollback, hardening you can check, and one command that
