@@ -49,9 +49,16 @@ jobs:
           tags="$(curl -fsS --retry 3 \
             'https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100' \
             | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr)"
-          from="$(echo "$tags" | sed -n '6p')"
-          to="$(echo "$tags" | sed -n '1p')"
-          test -n "$from" && test -n "$to" && [ "$from" != "$to" ]
+          # One page of 100 tags yields only a handful of pure-semver names -
+          # the rest are arch and sha variants (2.37.1-amd64, 2.37.1-<sha>-pc,
+          # ...). So take the OLDEST available rather than a fixed offset.
+          echo "$tags"
+          to="$(echo "$tags" | head -n1)"
+          from="$(echo "$tags" | tail -n1)"
+          if [ -z "$from" ] || [ -z "$to" ] || [ "$from" = "$to" ]; then
+            echo "need at least two distinct stable tags, got: from='$from' to='$to'"
+            exit 1
+          fi
           echo "FROM_TAG=$from" >> "$GITHUB_ENV"
           echo "TO_TAG=$to" >> "$GITHUB_ENV"
           echo "will install $from and upgrade to $to"
