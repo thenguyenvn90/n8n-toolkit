@@ -113,8 +113,11 @@ do_local_backup() {
 
     log INFO "Cleaning up local backups older than $DAYS_TO_KEEP days..."
     rm -rf "$BACKUP_PATH"
-    find "$BACKUP_DIR" -type f -name "*.tar.gz" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
-    find "$BACKUP_DIR" -type f -name "*.sha256" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
+    # -maxdepth 1 keeps the prune out of backups/pre-restore/ and backups/pre-upgrade/.
+    # Those are rescue copies kept by count, not by age — a prune that eats them
+    # defeats the point of taking them.
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.tar.gz" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sha256" -mtime +$DAYS_TO_KEEP -exec rm -f {} \;
     find "$BACKUP_DIR" -maxdepth 1 -type d -name 'backup_*' -empty -exec rmdir {} \;
     log INFO "Removed any empty backup_<timestamp> folders"
     return 0
@@ -455,6 +458,221 @@ backup_stack() {
 }
 
 ################################################################################
+# snapshot_keep_last()
+# Description:
+#   Keep only the newest N timestamped snapshot directories under a snapshot
+#   root, deleting the rest.
+#
+# Args:
+#   $1 -> snapshot root (e.g. "$BACKUP_DIR/pre-restore")
+#   $2 -> how many to keep (default: 3)
+#
+# Returns:
+#   0 always.
+#
+# Notes:
+#   Snapshot dirs are named with the DATE stamp (YYYY-MM-DD_HH-MM-SS), so a
+#   reverse lexicographic sort is a chronological sort. Kept by COUNT, not age —
+#   a rescue copy that expires on a timer is not a rescue copy.
+################################################################################
+snapshot_keep_last() {
+    local root="$1"
+    local keep="${2:-3}"
+    [[ -d "$root" ]] || return 0
+
+    local -a dirs=()
+    local d
+    while IFS= read -r d; do
+        [[ -n "$d" ]] && dirs+=("$d")
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d | sort -r)
+
+    local i
+    for (( i = keep; i < ${#dirs[@]}; i++ )); do
+        rm -rf -- "${dirs[$i]}"
+        log INFO "Pruned old snapshot: $(basename "${dirs[$i]}")"
+    done
+    return 0
+}
+
+################################################################################
+# recent_backup_exists()
+# Description:
+#   Report whether a full backup archive was written in the last N minutes.
+#
+# Args:
+#   $1 -> age in minutes (default: 60)
+#
+# Returns:
+#   0 if a recent archive exists; 1 otherwise.
+################################################################################
+recent_backup_exists() {
+    local minutes="${1:-60}"
+    [[ -d "$BACKUP_DIR" ]] || return 1
+    local hit
+    hit="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'n8n_backup_*.tar.gz' \
+             -mmin "-${minutes}" -print -quit 2>/dev/null || true)"
+    [[ -n "$hit" ]]
+}
+
+################################################################################
+# snapshot_current_state()
+# Description:
+#   Take a rescue copy of the CURRENT instance before a destructive operation.
+#
+# Args:
+#   $1 -> kind: "pre-restore" | "pre-upgrade"
+#
+# Behaviors:
+#   - Always copies .env and docker-compose.yml. These are cheap and they are
+#     exactly what is lost in the worst case: overwrite the live
+#     N8N_ENCRYPTION_KEY and every credential in the database becomes
+#     permanently undecryptable.
+#   - Dumps PostgreSQL too, UNLESS a full backup was taken in the last hour
+#     (that archive already holds the same data).
+#   - Keeps the last 3 snapshots per kind, by count.
+#
+# Output:
+#   Prints the snapshot directory path to stdout on success.
+#
+# Returns:
+#   0 on success (including the degraded config-only case); 1 if the snapshot
+#   directory could not be created.
+################################################################################
+snapshot_current_state() {
+    local kind="${1:-pre-restore}"
+    local root="$BACKUP_DIR/$kind"
+    local dir="$root/$DATE"
+
+    mkdir -p "$dir" || { log ERROR "Cannot create snapshot dir: $dir"; return 1; }
+    chmod 700 "$root" "$dir" 2>/dev/null || true
+
+    local copied=0
+    if [[ -f "$ENV_FILE" ]]; then
+        cp -a "$ENV_FILE" "$dir/.env.bak" && copied=1
+    fi
+    if [[ -f "$COMPOSE_FILE" ]]; then
+        cp -a "$COMPOSE_FILE" "$dir/docker-compose.yml.bak" && copied=1
+    fi
+    chmod 600 "$dir"/* 2>/dev/null || true
+
+    if (( copied == 0 )); then
+        log INFO "No live .env/compose to snapshot (fresh target) — nothing to rescue."
+    fi
+
+    if recent_backup_exists 60; then
+        log INFO "A full backup exists from the last hour; skipping the snapshot DB dump."
+        printf '%s\n' "$dir"
+        snapshot_keep_last "$root" 3
+        return 0
+    fi
+
+    local pg_cid
+    pg_cid="$(container_id_for_service "$POSTGRES_SERVICE" 2>/dev/null || true)"
+    if [[ -z "$pg_cid" ]]; then
+        log INFO "PostgreSQL not running; snapshot is config-only."
+        printf '%s\n' "$dir"
+        snapshot_keep_last "$root" 3
+        return 0
+    fi
+
+    local db_user db_name admin_pass
+    db_user="$(read_env_var "$ENV_FILE" DB_POSTGRESDB_USER || echo n8n)"
+    db_name="$(read_env_var "$ENV_FILE" DB_POSTGRESDB_DATABASE || echo n8n)"
+    admin_pass="$(_read_env_var_from_container "$pg_cid" POSTGRES_PASSWORD 2>/dev/null || true)"
+
+    log INFO "Dumping ${db_name} into the ${kind} snapshot..."
+    if docker exec -e PGPASSWORD="$admin_pass" "$pg_cid" \
+         pg_dump -U "$db_user" -d "$db_name" -F c > "$dir/n8n_postgres_dump_${DATE}.dump" 2>/dev/null; then
+        chmod 600 "$dir/n8n_postgres_dump_${DATE}.dump" 2>/dev/null || true
+        log INFO "Snapshot DB dump written."
+    else
+        rm -f "$dir/n8n_postgres_dump_${DATE}.dump"
+        log WARN "Snapshot DB dump failed; snapshot is config-only."
+    fi
+
+    printf '%s\n' "$dir"
+    snapshot_keep_last "$root" 3
+    return 0
+}
+
+################################################################################
+# preview_restore_archive()
+# Description:
+#   Print what a restore is about to do, and gate it behind a confirmation.
+#
+# Args:
+#   $1 -> extracted archive dir (contains .env.bak / docker-compose.yml.bak)
+#   $2 -> the archive path or remote spec the user asked for (for display)
+#
+# Behaviors:
+#   - Compares the archive's N8N_ENCRYPTION_KEY with the one currently live.
+#     Three outcomes: same instance / DIFFERENT instance / no existing instance.
+#     "Different" is the case that silently destroys every stored credential,
+#     so it gets the loudest treatment.
+#   - Prompts [y/N]. $FORCE_FLAG (-f) skips the prompt.
+#   - With no TTY and no -f, refuses rather than assuming yes. A cron job must
+#     opt in explicitly.
+#
+# Returns:
+#   0 to proceed; 1 to abort.
+################################################################################
+preview_restore_archive() {
+    local restore_dir="$1"
+    local requested_spec="$2"
+
+    local archive_key live_key archive_fqdn live_fqdn key_verdict
+    archive_key="$(read_env_var "$restore_dir/.env.bak" N8N_ENCRYPTION_KEY || true)"
+    archive_fqdn="$(read_env_var "$restore_dir/.env.bak" N8N_FQDN || true)"
+
+    if [[ -f "$ENV_FILE" ]]; then
+        live_key="$(read_env_var "$ENV_FILE" N8N_ENCRYPTION_KEY || true)"
+        live_fqdn="$(read_env_var "$ENV_FILE" N8N_FQDN || true)"
+    fi
+
+    if [[ -z "${live_key:-}" ]]; then
+        key_verdict="NO EXISTING INSTANCE (nothing to overwrite)"
+    elif [[ "$archive_key" == "$live_key" ]]; then
+        key_verdict="MATCH (same instance)"
+    else
+        key_verdict="DIFFERENT — credentials encrypted with the live key will NOT decrypt"
+    fi
+
+    echo "═════════════════════════════════════════════════════════════"
+    echo "RESTORE PREVIEW — this replaces the live instance"
+    box_line "Requested:"            "$requested_spec"
+    box_line "Local archive:"        "$TARGET_RESTORE_FILE"
+    box_line "Archive date:"         "$(date -r "$TARGET_RESTORE_FILE" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    box_line "Archive domain:"       "${archive_fqdn:-unknown}"
+    box_line "Live domain:"          "${live_fqdn:-none}"
+    box_line "Encryption key:"       "$key_verdict"
+    echo "═════════════════════════════════════════════════════════════"
+
+    if [[ -n "${live_key:-}" && "$archive_key" != "$live_key" ]]; then
+        log WARN "The archive was taken from a DIFFERENT instance."
+        log WARN "Restoring it overwrites the live N8N_ENCRYPTION_KEY. Any credential"
+        log WARN "still encrypted with the current key becomes unrecoverable."
+    fi
+
+    if [[ "${FORCE_FLAG:-false}" == true ]]; then
+        log WARN "-f given; skipping the restore confirmation."
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log ERROR "Restore needs confirmation but there is no terminal to ask on."
+        log ERROR "Re-run with -f if you intend this to run unattended."
+        return 1
+    fi
+
+    local reply=""
+    read -r -p "Proceed with restore? [y/N]: " reply
+    case "$reply" in
+        y|Y|yes|YES) return 0 ;;
+        *) log INFO "Restore cancelled. Nothing was changed."; return 1 ;;
+    esac
+}
+
+################################################################################
 # restore_stack()
 # Description:
 #   Restore the n8n stack from a backup archive (configs, volumes, database).
@@ -521,6 +739,25 @@ restore_stack() {
         log WARN "N8N_ENCRYPTION_KEY in $backup_env_path doesn't look base64. Decryption may fail."
     fi
     log INFO "N8N_ENCRYPTION_KEY (masked): $(mask_secret "$n8n_encryption_key")"
+
+    # ---- POINT OF NO RETURN -------------------------------------------------
+    # Everything above this line only reads. Show the operator what is about to
+    # happen, get a yes, and take a rescue copy - THEN start mutating. Doing the
+    # .env overwrite first (as this function used to) meant a mistyped archive
+    # path destroyed the live encryption key before anything had been checked.
+    if ! preview_restore_archive "$restore_dir" "$requested_spec"; then
+        rm -rf "$restore_dir"
+        return 1
+    fi
+
+    local snap_dir
+    if ! snap_dir="$(snapshot_current_state pre-restore)"; then
+        log ERROR "Could not snapshot the current state; refusing to restore."
+        rm -rf "$restore_dir"
+        return 1
+    fi
+    log INFO "Pre-restore snapshot: $snap_dir"
+    log INFO "If this restore goes wrong, the previous .env and compose are in that directory."
 
     log INFO "Restoring local-files directory..."
     shopt -s nullglob
