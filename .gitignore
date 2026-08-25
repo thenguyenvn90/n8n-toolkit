@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# This repository had no .gitignore at all until v3.3.1.
+#
+# `queue-mode/.env` and `single-mode/.env` are already in the history (commits
+# f05f72f and 735fcaa). Those two only ever held placeholders — CHANGE_ME_…,
+# yourdomain.com — so nothing needs rotating. But they show exactly how a real
+# .env gets committed, and that is the failure mode GitGuardian found 321 live
+# n8n instances through: no vulnerability, just secrets in a public repo.
+#
+# tests/unit/test_gitignore.bats asserts the sensitive paths stay ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- Secrets ---------------------------------------------------------------
+# .env holds N8N_ENCRYPTION_KEY, the Postgres and Redis passwords, and the
+# instance-owner hash. Losing control of it loses control of every credential
+# stored in the instance.
+.env
+.env.*
+!.env.example
+secrets/
+**/secrets/
+
+# Grafana contact points carry a Telegram bot token in plain text.
+contactpoints.yaml
+**/provisioning/alerting/contactpoints.yaml
+
+# Traefik basic-auth file for Grafana and Prometheus.
+htpasswd
+
+# --- Backups ---------------------------------------------------------------
+# Every archive contains .env and a full PostgreSQL dump. Encrypted ones too:
+# a .gpg in the repo is a brute-force target with the passphrase as the only
+# thing standing between an attacker and the whole instance.
+backups/
+*.tar.gz
+*.tar.gz.gpg
+*.sha256
+*.dump
+
+# Copies install writes before overwriting.
+*.bak
+*.bak.*
+
+# --- Runtime ---------------------------------------------------------------
+logs/
+*.log
+local-files/
+n8n_restore_*/
+
+# --- Tooling ---------------------------------------------------------------
+# bats-core, cloned by tests/run_tests.sh when it is not on PATH.
+tests/bats/
+.bats/
+
+# --- OS / editor -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
