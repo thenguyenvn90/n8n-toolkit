@@ -385,13 +385,15 @@ summarize_backup() {
 #   0 on success (including SKIPPED); 1 if local backup failed.
 ################################################################################
 backup_stack() {
-    N8N_VERSION="$(get_current_n8n_version)"
     BACKUP_STATUS=""
     UPLOAD_STATUS=""
     BACKUP_FILE=""
     DRIVE_LINK=""
 
     load_env_file
+    # After load_env_file: it sources .env with allexport, so a legacy .env
+    # carrying N8N_VERSION= would otherwise mislabel the archive.
+    N8N_VERSION="$(get_current_n8n_version)"
     discover_from_compose
     detect_mode_runtime || true
 

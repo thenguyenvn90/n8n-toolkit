@@ -29,15 +29,19 @@ copy_templates_for_mode() {
         exit 1
     fi
 
-    if [[ ! -f "$src_dir/.env" ]]; then
-        log ERROR ".env file not found at $src_dir"
+    # Templates ship .env.example; a local .env (if the operator made one) wins.
+    local env_src="$src_dir/.env"
+    [[ -f "$env_src" ]] || env_src="$src_dir/.env.example"
+    if [[ ! -f "$env_src" ]]; then
+        log ERROR ".env/.env.example not found at $src_dir"
         exit 1
     fi
 
-    for f in docker-compose.yml .env; do
-        [[ -f "$N8N_DIR/$f" ]] && cp -a "$N8N_DIR/$f" "$N8N_DIR/${f}.bak.$(date +%F_%H-%M-%S)"
-        cp -a "$src_dir/$f" "$N8N_DIR/$f"
-    done
+    [[ -f "$N8N_DIR/docker-compose.yml" ]] && cp -a "$N8N_DIR/docker-compose.yml" "$N8N_DIR/docker-compose.yml.bak.$(date +%F_%H-%M-%S)"
+    cp -a "$src_dir/docker-compose.yml" "$N8N_DIR/docker-compose.yml"
+
+    [[ -f "$N8N_DIR/.env" ]] && cp -a "$N8N_DIR/.env" "$N8N_DIR/.env.bak.$(date +%F_%H-%M-%S)"
+    cp -a "$env_src" "$N8N_DIR/.env"
 
     # Update .env
     log INFO "Updating DOMAIN=$DOMAIN in $ENV_FILE"

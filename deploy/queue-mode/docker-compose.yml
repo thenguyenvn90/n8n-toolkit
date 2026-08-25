@@ -83,7 +83,7 @@ services:
 
   # Main (UI, schedules, webhooks) — does NOT execute workflows in queue mode
   main:
-    image: n8nio/n8n:${N8N_VERSION:-2.17.7}
+    image: n8nio/n8n:${N8N_IMAGE_TAG:-2.17.7}
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -136,7 +136,7 @@ services:
 
   # Worker(s) – scale horizontally; each embeds its own internal runner
   worker:
-    image: n8nio/n8n:${N8N_VERSION:-2.17.7}
+    image: n8nio/n8n:${N8N_IMAGE_TAG:-2.17.7}
     restart: unless-stopped
     env_file: [.env]
     environment:
