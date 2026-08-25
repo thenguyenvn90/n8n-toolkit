@@ -56,9 +56,29 @@ copy_templates_for_mode() {
     log INFO "Updating N8N_IMAGE_TAG=$target_version in $ENV_FILE"
     upsert_env_var "N8N_IMAGE_TAG" "$target_version" "$ENV_FILE"
 
+    # Instance owner (optional). n8n removed basic auth in 1.0, so this is the
+    # supported way to have an account waiting instead of a setup screen.
+    if [[ -n "${OWNER_EMAIL:-}" ]]; then
+        local owner_hash
+        if ! owner_hash="$(gen_bcrypt_hash "$OWNER_EMAIL" "$OWNER_PASSWORD")"; then
+            log ERROR "Could not hash the owner password (need apache2-utils htpasswd or Docker)."
+            exit 1
+        fi
+        # n8n validates the shape and refuses to boot on a bad one, so check here
+        # rather than letting the container crash-loop with a config error.
+        if [[ ! "$owner_hash" =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
+            log ERROR "Generated owner hash is not a bcrypt string n8n accepts."
+            exit 1
+        fi
+        log INFO "Provisioning instance owner $OWNER_EMAIL from the environment"
+        upsert_env_var "N8N_INSTANCE_OWNER_MANAGED_BY_ENV" "true"        "$ENV_FILE"
+        upsert_env_var "N8N_INSTANCE_OWNER_EMAIL"          "$OWNER_EMAIL" "$ENV_FILE"
+        upsert_env_var "N8N_INSTANCE_OWNER_PASSWORD_HASH"  "$owner_hash"  "$ENV_FILE"
+        unset owner_hash
+    fi
+
     # Rotate SECRETS in env if missing/default
     rotate_or_generate_secret "$ENV_FILE" POSTGRES_PASSWORD        16 "CHANGE_ME_BASE64_16_BYTES"
-    rotate_or_generate_secret "$ENV_FILE" N8N_BASIC_AUTH_PASSWORD  16 "CHANGE_ME_BASE64_16_BYTES"
     rotate_or_generate_secret "$ENV_FILE" N8N_RUNNERS_AUTH_TOKEN   16 "CHANGE_ME_BASE64_16_BYTES"
     rotate_or_generate_secret "$ENV_FILE" N8N_ENCRYPTION_KEY       32 "CHANGE_ME_BASE64_32_BYTES"
 
