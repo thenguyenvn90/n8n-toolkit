@@ -1,4 +1,4 @@
-# n8n-toolkit v3.0 — Install · Upgrade · Backup · Restore · Monitor
+# n8n-toolkit v3.3.3 — Install · Upgrade · Backup · Restore · Monitor · Diagnose
 
 **n8n-toolkit** is the all-in-one Bash CLI for fast, secure, and reliable n8n 2.x stack operations on Docker Compose.
 
@@ -166,29 +166,62 @@ chmod +x *.sh
 
 ## CLI Overview
 
+> Generated from `./n8n_manager.sh --help`. `tests/unit/test_docs_align.bats`
+> fails the build if this block and the real CLI drift apart.
+
 ```text
-Usage: ./n8n_manager.sh [ONE ACTION] [OPTIONS]
+Usage: n8n_manager.sh [ONE ACTION] [OPTIONS]
 
 Actions (choose exactly one):
-  -a, --available                     List available n8n versions
-  -i, --install <DOMAIN>              Install n8n for <DOMAIN>
-  -u, --upgrade                       Upgrade n8n in the chosen --dir (reads .env)
-  -b, --backup                        Run backup (skip if unchanged unless -f)
-  -r, --restore <FILE_OR_REMOTE>      Restore from local file or rclone remote
-  -c, --cleanup <safe|all>            Stop stack & remove resources (preview; confirm in 'all')
+  -a, --available
+        List available n8n versions
+
+  -i, --install <DOMAIN>
+        Install n8n with the given base domain (e.g., example.com)
+        Optional: --mode single|queue  (default: single)
+        Optional: -v|--version <tag>
+
+  -u, --upgrade
+        Upgrade n8n to target version (or latest). Domain/FQDNs are read from .env.
+
+  -b, --backup
+        Run backup (skip if no changes unless -f)
+
+  -r, --restore <FILE_OR_REMOTE>
+        Restore from local file or rclone remote (e.g. gdrive:folder/file.tar.gz)
+
+  -c, --cleanup [safe|all]  Stop stack & remove resources (preview; confirm in 'all')
+
+      --doctor
+        Diagnose the instance: health, security audit, legacy config.
+        Read-only. Ends with a masked block to paste into a bug report.
 
 Options:
-  --mode <single|queue>               Install mode (default: single)   [install only]
-  -v, --version <tag>                 n8n image tag (default: latest stable)
-  -m, --ssl-email <email>             Email for Let’s Encrypt (install/upgrade)
-  -d, --dir <path>                    Target directory (default: /home/n8n)
-  -l, --log-level <LEVEL>             DEBUG | INFO (default) | WARN | ERROR
-  -f, --force                         Force backup or downgrade/redeploy
-  -e, --email-to <email>              Send notifications to this address
-  -n, --notify-on-success             Also email on success (not just failures)
-  -s, --remote-name <name|path>       rclone remote (e.g. gdrive or gdrive:/n8n-backups)
+  --mode <single|queue>     (install only; default: single)
+  -v, --version <tag>       Target n8n version (default: latest stable)
+  -m, --ssl-email <email>   LE certificate email (install/upgrade)
+  -d, --dir <path>          Target n8n directory (default: /home/n8n)
+  -l, --log-level <LEVEL>   DEBUG | INFO (default) | WARN | ERROR
+  -f, --force               Upgrade: allow downgrade or redeploy; Backup: force even if unchanged
+      --alerts <channel>    Deliver Grafana alerts (install-only). Currently: telegram
+      --alert-target <t>    Telegram: '<bot-token>:<chat-id>'
+      --encrypt             Encrypt the backup archive (gpg --symmetric, AES256)
+                            Passphrase from BACKUP_PASSPHRASE in the environment
+                            Required for uploads from v3.5.0; warns until then
+      --no-encrypt          Upload without encryption, and mean it
+      --keep-days <N>       Days to keep backups, local and remote (default: 7)
+                            Logs are pruned after 7 days regardless
+  -e, --email-to <email>    Send notifications to this address (requires SMTP_USER/SMTP_PASS env)
+  -n, --notify-on-success   Also email on success (not just failures)
+  -s, --remote-name <name>  rclone remote root (e.g. gdrive-user or gdrive-user:/n8n-backups)
+      --self-version        Print the toolkit version and exit
+                            (-v selects the n8n version; this is the toolkit)
+  -h, --help                Show this help
 
-  # Monitoring-related (install-time):
+# Monitoring-related (install-time):
+  --local                             Self-signed TLS on *.localhost; skips the DNS
+                                      check and Let's Encrypt. For trying the stack
+                                      locally or in CI, not for a public server
   --monitoring                        Enable Prometheus/Grafana profile
   --expose-prometheus                 Expose Prometheus publicly (default: private)
   --subdomain-n8n <sub>               Override n8n subdomain (default: n8n)
@@ -196,6 +229,37 @@ Options:
   --subdomain-prometheus <sub>        Override Prometheus subdomain (default: prometheus)
   --basic-auth-user <user>            Traefik basic auth user for Grafana/Prometheus
   --basic-auth-pass <pass>            Traefik basic auth pass for Grafana/Prometheus
+  --owner-email <email>               Create the n8n instance owner from the environment
+  --owner-password <pass>             Owner password (hashed before it is written)
+                                      Both are install-only and must be given together
+
+Examples:
+  n8n_manager.sh -a
+      # List available versions
+
+  n8n_manager.sh --install example.com -m you@example.com
+      # Install the latest n8n version with single mode
+
+  n8n_manager.sh --install example.com -m you@example.com -v 1.105.3 --mode queue
+      # Install a specific n8n version with queue mode
+
+  n8n_manager.sh --install example.com -m you@example.com -d /path/to/n8n --mode queue
+      # Install the latest n8n version (queue mode) to a specific target directory
+
+  n8n_manager.sh --install example.com -m you@example.com --mode queue --monitoring --basic-auth-user admin --basic-auth-pass 'StrongPass123'
+      # Install the latest n8n version (queue mode) with monitoring (Grafana + Prometheus)
+
+  n8n_manager.sh --upgrade
+      # Upgrade to the latest n8n version (domain/FQDNs read from .env)
+
+  n8n_manager.sh --upgrade -f -v 1.107.2
+      # Upgrade to a specific n8n version
+
+  n8n_manager.sh --backup --remote-name gdrive-user --email-to ops@example.com --notify-on-success
+      # Backup and upload to Google Drive, notify via email
+
+  n8n_manager.sh --restore backups/your_backup_file.tar.gz
+      # Restore with the tar.gz file at local
 ```
 
 > **Two different emails:**  
@@ -709,10 +773,121 @@ It’s internal by default. Set `EXPOSE_PROMETHEUS=true` (or pass `--expose-prom
 
 ---
 
+## Diagnose (`--doctor`)
+
+One read-only command that answers "is this instance healthy, and is it safe?".
+It changes nothing — it names problems and the fix.
+
+```bash
+sudo ./n8n_manager.sh --doctor -d /home/n8n
+```
+
+It prints the verdict first (`FAIL` / `WARN` / `PASS` with counts), then the
+detail by section, then a block you can paste straight into a bug report with
+every secret masked. Exit code is `0` when nothing failed, `1` otherwise, so it
+works in a cron health check.
+
+| Section | Checks |
+|---|---|
+| Health | stack files, mode, n8n version, per-service container state and health, free disk |
+| Security | encryption key still the shipped placeholder · `.env` readable beyond its owner · n8n below the CVE patch floor · n8n's port published on all interfaces · `.env` tracked by git · backups uploaded unencrypted · alert rules with no contact point |
+| Legacy | dead `N8N_BASIC_AUTH_*` keys · a pre-v3.1 compose still reading `${N8N_VERSION}` · whether this instance is in `--local` mode |
+| Webhooks | for each active workflow, is there a row in `webhook_entity`? An active workflow whose webhook never registered answers 404 on its production `/form/` URL while the UI shows it live |
+
+The CVE floors come from the NVD records, not from press coverage: **1.123.22**
+for the 1.x line and **2.10.1** for 2.x.
+
+---
+
+## Try it locally (`--local`)
+
+Installs on `*.localhost` with a self-signed certificate, skipping the public DNS
+check and Let's Encrypt. For evaluating the toolkit, or for CI — **not for a
+public server**.
+
+```bash
+sudo ./n8n_manager.sh --install --local --mode queue -d ~/n8n-local
+# https://n8n.localhost  (your browser will warn about the certificate)
+```
+
+It ships as a compose **overlay**, so the production `docker-compose.yml` is
+byte-identical whether or not you use it. Later commands (`--upgrade`,
+`--backup`, `--cleanup`) detect local mode from the overlay's presence, so there
+is no flag to remember and nothing to keep in sync.
+
+Requires Docker Compose 2.24+.
+
+---
+
+## Encrypted backups (`--encrypt`)
+
+A backup archive contains `.env` — your `N8N_ENCRYPTION_KEY`, database and Redis
+passwords — plus a full PostgreSQL dump. Uploading that unencrypted means whoever
+can read your cloud storage can decrypt every credential in the instance.
+
+```bash
+BACKUP_PASSPHRASE='...' sudo -E ./n8n_manager.sh -b --encrypt -s gdrive:/n8n-backups
+```
+
+- `gpg --symmetric --cipher-algo AES256`.
+- The passphrase comes from `BACKUP_PASSPHRASE` in the environment, so the key
+  does not sit on the machine holding the data it protects. It is also read from
+  `.env`, with a warning saying exactly what that does and does not defend
+  against.
+- **It is never generated.** A backup encrypted with a key you do not hold is not
+  a backup.
+- Restore detects a `.gpg` archive and decrypts it before anything else.
+
+Local archives stay unencrypted by default — they are already behind `umask 0077`
+on your own server. An unencrypted **upload** prints a warning; `--no-encrypt`
+silences it. **From v3.5.0 encryption becomes mandatory for uploads.**
+
+---
+
+## Instance owner from the environment
+
+n8n removed basic auth in 1.0. To have an account waiting instead of the setup
+screen:
+
+```bash
+sudo ./n8n_manager.sh --install example.com -m you@example.com \
+  --owner-email you@example.com --owner-password 'a strong password'
+```
+
+The password is bcrypt-hashed before it is written — the plaintext never reaches
+`.env`. Both flags must be given together. n8n re-applies these on every boot, so
+a password changed in the UI is overwritten on restart; that is n8n's behaviour,
+not the toolkit's.
+
+---
+
+## Alert delivery (`--alerts`)
+
+The monitoring profile ships 14 Grafana alert rules with thresholds tuned for n8n
+(event-loop p99 at 250/500 ms, RSS at 850 MiB, API error ratio at 2%/5%, queue
+backlog, "queue active but throughput ~ 0", version skew). Until you give them a
+contact point they evaluate and notify nobody.
+
+```bash
+sudo ./n8n_manager.sh --install example.com -m you@example.com --monitoring \
+  --alerts telegram --alert-target '<bot-token>:<chat-id>'
+```
+
+`--doctor` warns when rules exist with no delivery configured.
+
+---
+
 ## Security Notes
 
-- **Protect `.env`** — it contains **`N8N_ENCRYPTION_KEY`** and other secrets.
-- Treat backup archives as **sensitive** (DB dumps, configs).
+- **Run `--doctor`.** It checks the things below and tells you which ones are
+  wrong on *this* instance, including whether your n8n is behind the CVE patch
+  floor.
+- **Protect `.env`** — it contains **`N8N_ENCRYPTION_KEY`** and other secrets. It
+  is gitignored; keep it that way. Secrets committed to a public repository are
+  how 321 live n8n instances were found in 2026, with no vulnerability involved.
+- Treat backup archives as **sensitive** (DB dumps, configs), and use
+  **`--encrypt`** for anything leaving the machine. Required for uploads from
+  v3.5.0.
 - Use strong passwords and rotate tokens regularly.
 - Restrict SSH access and keep your system updated.
 - Keep `EXPOSE_PROMETHEUS=false` unless you need its UI; it’s always behind Basic Auth if exposed.

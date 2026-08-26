@@ -53,7 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The toolkit's own version. Note this is NOT -v/--version, which selects the
 # n8n version to deploy. Printed by --self-version and stamped at the top of
 # every log file so a bug report can name the revision it came from.
-TOOLKIT_VERSION="3.3.3"
+TOOLKIT_VERSION="3.4.0"
 
 # Load shared helpers
 LIB_DIR="$SCRIPT_DIR/lib"
