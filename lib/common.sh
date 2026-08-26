@@ -1761,7 +1761,7 @@ get_current_n8n_version() {
 ################################################################################
 get_latest_n8n_version() {
     local latest
-    latest="$(_fetch_stable_tags 100 | head -n 1 || true)"
+    latest="$(_fetch_stable_tags 1 | head -n 1 || true)"
     [[ -z "$latest" ]] && log ERROR "Could not fetch latest n8n tag from Docker Hub"
     echo "$latest"
 }
@@ -1778,47 +1778,76 @@ get_latest_n8n_version() {
 #     0 on success (even if none found); 1 if jq/curl missing.
 ################################################################################
 list_available_versions() {
-    mapfile -t all < <(_fetch_stable_tags 100 | head -n 5)
+    local want="${1:-5}"
+    local -a all=()
+    mapfile -t all < <(_fetch_stable_tags "$want")
     if ((${#all[@]}==0)); then
         log WARN "No n8n stable version found from Docker Hub"
         return 0
     fi
 
-    echo "Latest 5 n8n versions (newest first):"
+    # Report what was actually found. The old text always said "Latest 5" and
+    # then printed 4, because one page of tags does not hold five plain names.
+    echo "Latest ${#all[@]} n8n version(s), newest first:"
     printf "%s\n" "${all[@]}"
 }
 
 ################################################################################
 # _fetch_stable_tags()
 # Description:
-#     Internal helper to fetch and output all stable semver tags (x.y.z) for
-#     n8n from Docker Hub, sorted newest-first (version-aware).
+#     Print stable semver tags (x.y.z) for n8n from Docker Hub, newest first.
+#
+#     Docker Hub returns architecture and digest variants alongside the plain
+#     names - 2.37.1-amd64, 2.37.1-<sha>-pc, 2.37.1-arm64 and so on - so one
+#     page of 100 tags yields only about FOUR usable versions. Asking for a
+#     single page and hoping is why `-a` promised the latest 5 and could only
+#     ever show 4. This follows the API's `next` link until it has enough.
 #
 # Args:
-#     $1 -> page size to request (default: 100)
+#     $1 -> how many stable tags are wanted (default 5)
 #
 # Output:
-#     Prints one tag per line, e.g.:
-#         1.107.2
-#         1.107.1
+#     One tag per line, newest first, at most $1 of them:
+#         2.37.1
+#         2.37.0
 #         ...
 #
 # Returns:
-#     0 on success (even if empty); non-zero if curl/jq missing or fetch fails.
+#     0 on success (even if fewer than requested were found);
+#     1 if jq/curl are missing or the first page cannot be fetched.
 ################################################################################
 _fetch_stable_tags() {
-    local page_size="${1:-100}"
+    local want="${1:-5}"
     require_cmd jq || return 1
     require_cmd curl || return 1
 
-    local url="https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=${page_size}"
-    local page_json
-    page_json=$(curl -fsS --retry 3 --retry-delay 2 "$url" 2>/dev/null || true)
-    [[ -z "$page_json" ]] && { log WARN "Failed to fetch tags page"; return 1; }
+    # 100 is Docker Hub's maximum page size. The page cap stops a pathological
+    # tag list from turning `-a` into an unbounded crawl.
+    local url="https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100"
+    local max_pages="${TAG_FETCH_MAX_PAGES:-5}"
 
-    jq -r '.results[].name' <<<"$page_json" \
-        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | sort -Vr
+    local page=0 page_json names collected=""
+    while [[ -n "$url" ]] && (( page < max_pages )); do
+        page_json="$(curl -fsS --retry 3 --retry-delay 2 "$url" 2>/dev/null || true)"
+        if [[ -z "$page_json" ]]; then
+            (( page == 0 )) && { log WARN "Failed to fetch tags page"; return 1; }
+            break   # a later page failing still leaves usable results
+        fi
+
+        names="$(jq -r '.results[]?.name // empty' <<<"$page_json" 2>/dev/null \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+        [[ -n "$names" ]] && collected+="${names}"$'\n'
+
+        # Enough already? Stop paging rather than being thorough for its own sake.
+        if (( $(printf '%s' "$collected" | grep -c . || true) >= want )); then
+            break
+        fi
+
+        url="$(jq -r '.next // empty' <<<"$page_json" 2>/dev/null || true)"
+        page=$(( page + 1 ))
+    done
+
+    printf '%s' "$collected" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vru | head -n "$want"
 }
 
 ################################################################################

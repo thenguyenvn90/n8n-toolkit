@@ -172,8 +172,17 @@ case "$args" in
         echo "1.2.3.4"
         ;;
     *"registry.hub.docker.com"*)
-        # Return JSON with one stable tag
-        printf '{"results":[{"name":"1.108.0"},{"name":"1.107.2"},{"name":"latest"}]}\n'
+        # Two pages, mirroring the real API: each page is mostly arch and digest
+        # variants, so only a couple of plain semver names survive per page.
+        # Page 2 is only reachable by following "next", which is the point.
+        case "$args" in
+            *"page=2"*)
+                printf '{"next":null,"results":[{"name":"1.106.3"},{"name":"1.106.3-amd64"},{"name":"1.105.4"},{"name":"1.105.4-arm64"}]}\n'
+                ;;
+            *)
+                printf '{"next":"https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100&page=2","results":[{"name":"latest"},{"name":"1.108.0"},{"name":"1.108.0-amd64"},{"name":"1.107.2"},{"name":"1.107.2-arm64"},{"name":"next"}]}\n'
+                ;;
+        esac
         ;;
     *"-sSI"*"https://"*)
         # TLS probe — return success headers with http/ssl info
@@ -271,8 +280,16 @@ filter="${args[0]:-}"
 # Read stdin
 input="$(cat)"
 
-# Pattern: .results[].name  → extract Docker Hub tag names
-if [[ "$filter" == ".results[].name" ]]; then
+# Pattern: .next  → Docker Hub pagination link ("next":null on the last page)
+if [[ "$filter" == *".next"* ]]; then
+    if [[ "$input" =~ \"next\":\"([^\"]+)\" ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+    exit 0
+fi
+
+# Pattern: .results[].name / .results[]?.name // empty  → Docker Hub tag names
+if [[ "$filter" == *"results"*"name"* ]]; then
     # Use sed to extract all "name":"value" pairs from the JSON (handles single-line JSON)
     echo "$input" | sed 's/},{/}\n{/g' | while IFS= read -r segment; do
         if [[ "$segment" =~ \"name\":\"([^\"]+)\" ]]; then
