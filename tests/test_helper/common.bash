@@ -214,7 +214,15 @@ EOF
 #!/bin/bash
 case "$*" in
     *"api.ipify.org"*)           echo "1.2.3.4" ;;
-    *"registry.hub.docker.com"*) printf '{"results":[{"name":"1.108.0"},{"name":"1.107.2"},{"name":"latest"}]}\n' ;;
+    *"registry.hub.docker.com"*)
+        # Two pages, as the real API returns them: mostly arch and digest
+        # variants, so only a couple of plain semver names survive per page.
+        # Page 2 is reachable only by following "next".
+        case "$*" in
+            *"page=2"*) printf '{"next":null,"results":[{"name":"1.106.3"},{"name":"1.106.3-amd64"},{"name":"1.105.4"}]}\n' ;;
+            *)          printf '{"next":"https://registry.hub.docker.com/v2/repositories/n8nio/n8n/tags?page_size=100&page=2","results":[{"name":"latest"},{"name":"1.108.0"},{"name":"1.108.0-amd64"},{"name":"1.107.2"}]}\n' ;;
+        esac
+        ;;
     *)                           echo "1.2.3.4" ;;
 esac
 EOF
@@ -273,7 +281,16 @@ done
 filter="${args[0]:-}"
 input="$(cat)"
 
-if [[ "$filter" == ".results[].name" ]]; then
+# Pattern: .next  -> Docker Hub pagination link ("next":null on the last page)
+if [[ "$filter" == *".next"* ]]; then
+    if [[ "$input" =~ \"next\":\"([^\"]+)\" ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+    exit 0
+fi
+
+# Pattern: .results[].name / .results[]?.name // empty  -> Docker Hub tag names
+if [[ "$filter" == *"results"*"name"* ]]; then
     echo "$input" | sed 's/},{/}\n{/g' | while IFS= read -r seg; do
         [[ "$seg" =~ \"name\":\"([^\"]+)\" ]] && echo "${BASH_REMATCH[1]}"
     done

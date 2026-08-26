@@ -250,3 +250,51 @@ EOF
     run grep -rl "hunter2" "$sandbox"
     [ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Tag pagination
+#
+# Docker Hub returns arch and digest variants alongside the plain names
+# (2.37.1-amd64, 2.37.1-<sha>-pc, ...), so ONE page of 100 tags yields about
+# four usable versions. `-a` promised "Latest 5" and could only ever print 4.
+# The stub mirrors that: two pages, a couple of plain names each, page 2
+# reachable only by following "next".
+# ---------------------------------------------------------------------------
+
+@test "_fetch_stable_tags follows next until it has what was asked for" {
+    run _fetch_stable_tags 4
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    # 1.106.3 and 1.105.4 only exist on page 2
+    [[ "$output" == *"1.106.3"* ]]
+    [[ "$output" == *"1.105.4"* ]]
+}
+
+@test "_fetch_stable_tags stops paging once it has enough" {
+    # Asking for 2 must be satisfied by page 1 alone, so nothing from page 2.
+    run _fetch_stable_tags 2
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "$output" != *"1.106.3"* ]]
+}
+
+@test "_fetch_stable_tags returns newest first and drops arch variants" {
+    run _fetch_stable_tags 4
+    [ "${lines[0]}" = "1.108.0" ]
+    [[ "$output" != *"-amd64"* ]]
+    [[ "$output" != *"-arm64"* ]]
+    [[ "$output" != *"latest"* ]]
+    [[ "$output" != *"next"* ]]
+}
+
+@test "list_available_versions reports how many it actually found" {
+    # The old text always said "Latest 5" and then printed 4.
+    run list_available_versions 4
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Latest 4 n8n version(s)"* ]]
+    [[ "$output" != *"Latest 5 n8n versions"* ]]
+}
+
+@test "the page crawl is bounded" {
+    # A pathological tag list must not turn -a into an unbounded crawl.
+    grep -q 'TAG_FETCH_MAX_PAGES:-5' "$REPO_ROOT/lib/common.sh"
+}
