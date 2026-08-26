@@ -7,7 +7,10 @@ Status: **v3.1.0, v3.2.0 and v3.3.0 shipped** · Created 2026-08-25 · Baseline 
 | v3.1.0 — Safety | shipped | #6 #7 #8 #9 |
 | v3.2.0 — Remove the lies, remove the gate | shipped | #11 #12 #13 #14 |
 | v3.3.0 — Hardening | shipped | #16 #17 |
-| v3.5.0 — Encryption enforced | pending | — |
+| v3.5.0 — Encryption enforced | pending by design | — |
+
+All findings F1–F14 are closed. The only open items are v3.5.0 (waiting out its two-release
+notice period, per D18) and issue #1 (waiting on the reporter's logs).
 
 This plan came out of a code audit plus a 30-day survey of what self-hosters actually
 struggle with. Every finding was verified in the source, not inferred from the README.
@@ -215,8 +218,10 @@ top-level directory.
 variants (`2.37.1-amd64`, `2.37.1-<sha>-pc`, …). Only **4** pure-semver names survive the
 filter, so `list_available_versions` promises the latest 5 and can only ever return 4.
 
-Not yet fixed. Surfaced while writing the smoke test, which had to take the oldest
-available tag rather than a fixed offset.
+Fixed in #21: `_fetch_stable_tags` follows the API's `next` link until it has as many
+stable tags as the caller asked for, capped at 5 pages. Measured against the live API:
+page 1 yields 4 semver names, page 2 yields 13. Surfaced while writing the smoke test,
+which had to take the oldest available tag rather than a fixed offset.
 
 ### F14 — the upgrade wrote the new tag and came back on the old one · HIGH
 
