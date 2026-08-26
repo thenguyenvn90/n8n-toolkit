@@ -2,6 +2,8 @@
 # lib/install.sh — Install stack functions
 # Sourced by n8n_manager.sh — do not execute directly.
 # shellcheck disable=SC2154  # Variables set by n8n_manager.sh globals
+# shellcheck disable=SC2034  # DISCOVERED_MODE is declared in common.sh and read by
+#                            # the summaries; shellcheck cannot see across files.
 
 ################################################################################
 # copy_templates_for_mode()

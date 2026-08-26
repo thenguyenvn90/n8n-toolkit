@@ -1163,7 +1163,12 @@ check_container_healthy() {
     log ERROR "Timeout after ${timeout}s. '$target' is not healthy."
     if [[ -n "$cids" ]]; then
         log INFO "Recent logs from $target:"
-        docker logs --tail 200 $(echo "$cids") || true
+        local _cid
+        while IFS= read -r _cid; do
+            [[ -n "$_cid" ]] || continue
+            log INFO "--- $_cid ---"
+            docker logs --tail 200 "$_cid" 2>&1 || true
+        done <<< "$cids"
     fi
     return 1
 }
@@ -1919,7 +1924,8 @@ send_email() {
     # and the rm below left SMTP_PASS in /tmp as plaintext.
     trap 'rm -f "$pass_tmp"' RETURN
     printf '%s' "$SMTP_PASS" > "$pass_tmp"; chmod 600 "$pass_tmp"
-    local boundary="=====n8n_backup_$(date +%s)_$$====="
+    local boundary
+    boundary="=====n8n_backup_$(date +%s)_$$====="
 
     {
         echo "From: $SMTP_USER"
