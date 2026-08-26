@@ -61,7 +61,11 @@ do_local_backup() {
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
     local ADMIN_USER="${POSTGRES_USER:-postgres}"
     local pgcid; pgcid="$(container_id_for_service "$POSTGRES_SERVICE")"
-    local ADMIN_PASS="$(_read_env_var_from_container "$pgcid" POSTGRES_PASSWORD)"
+    local ADMIN_PASS
+    ADMIN_PASS="$(_read_env_var_from_container "$pgcid" POSTGRES_PASSWORD)" || {
+        log ERROR "Could not read POSTGRES_PASSWORD from the running container."
+        return 1
+    }
 
     if [[ -z "$pgcid" ]]; then
         log ERROR "Postgres service '$POSTGRES_SERVICE' is not running"
@@ -870,7 +874,8 @@ restore_stack() {
     decrypt_backup_archive || return 1
 
     log INFO "Starting restore at $DATE..."
-    local restore_dir="$N8N_DIR/n8n_restore_$(date +%s)"
+    local restore_dir
+    restore_dir="$N8N_DIR/n8n_restore_$(date +%s)"
     mkdir -p "$restore_dir" || { log ERROR "Cannot create $restore_dir"; return 1; }
 
     log INFO "Extracting backup archive to $restore_dir"
@@ -1037,7 +1042,11 @@ restore_stack() {
     local DB_USER="${DB_POSTGRESDB_USER:-${POSTGRES_USER:-n8n}}"
     local DB_NAME="${DB_POSTGRESDB_DATABASE:-${POSTGRES_DB:-n8n}}"
     local ADMIN_USER="${POSTGRES_USER:-postgres}"
-    local ADMIN_PASS="$(_read_env_var_from_container "$PG_CID" POSTGRES_PASSWORD)"
+    local ADMIN_PASS
+    ADMIN_PASS="$(_read_env_var_from_container "$PG_CID" POSTGRES_PASSWORD)" || {
+        log ERROR "Could not read POSTGRES_PASSWORD from the running container."
+        return 1
+    }
 
     local POSTGRES_RESTORE_MODE=""
     log INFO "Recreating database ${DB_NAME}..."

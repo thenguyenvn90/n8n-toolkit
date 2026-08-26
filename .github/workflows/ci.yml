@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep in step with the version used locally; see the install step below.
+  SHELLCHECK_VERSION: "0.11.0"
+
 jobs:
   shellcheck:
     name: shellcheck
@@ -17,19 +21,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # Pinned, not apt. Ubuntu's package and koalaman/shellcheck:stable are
+      # different releases that disagree about which checks exist, so a local
+      # run came back clean while CI went red on SC2120.
+      #
+      # Verified across versions: 0.9.x reports SC2120, 0.11.0 removed it
+      # entirely - not even `--enable=all` brings it back, so upstream retired
+      # the check rather than making it opt-in. Pinned to 0.11.0 (current
+      # stable) rather than chasing an older, stricter build.
+      #
+      # The SC2120 finding was real here regardless, and was fixed rather than
+      # waited out: wait_for_containers_healthy took positional arguments no
+      # caller ever passed.
+      #
+      # Bump deliberately, and re-run locally with the same tag.
+      - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJf - --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          shellcheck --version
 
-      # Gate on `error` only. The suite currently has 0 of those, so this
-      # starts green and stays honest: a new error fails the build.
-      - name: shellcheck (errors gate the build)
-        run: shellcheck --severity=error --format=gcc n8n_manager.sh lib/*.sh tests/run_tests.sh
-
-      # Warnings are reported for visibility but do not gate. Most are SC2034
-      # (unused variable), inherent to the sourced-library layout where
-      # n8n_manager.sh declares globals the libs consume.
-      - name: shellcheck (warnings, advisory)
-        continue-on-error: true
+      # Gates on `warning`, not just `error`. It started at `error` because the
+      # tree had 40 warnings and a build that is red on day one trains everyone
+      # to ignore it. Those are now zero, so the bar moves up and a new warning
+      # fails the build.
+      #
+      # The two file-level SC2034/SC2154 directives are the sourced-library
+      # layout, not a suppression of real findings: n8n_manager.sh declares the
+      # globals lib/*.sh consume, and shellcheck cannot see across files.
+      - name: shellcheck (warnings gate the build)
         run: shellcheck --severity=warning --format=gcc n8n_manager.sh lib/*.sh tests/run_tests.sh
 
   bats:

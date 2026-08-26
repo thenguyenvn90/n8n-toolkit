@@ -1,4 +1,7 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # This file declares the globals lib/*.sh consume.
+#                            # Mirror of the SC2154 directive each lib carries;
+#                            # shellcheck cannot see across sourced files.
 set -euo pipefail
 set -o errtrace
 IFS=$'\n\t'
@@ -50,7 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The toolkit's own version. Note this is NOT -v/--version, which selects the
 # n8n version to deploy. Printed by --self-version and stamped at the top of
 # every log file so a bug report can name the revision it came from.
-TOOLKIT_VERSION="3.3.1"
+TOOLKIT_VERSION="3.3.2"
 
 # Load shared helpers
 LIB_DIR="$SCRIPT_DIR/lib"

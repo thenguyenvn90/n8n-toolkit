@@ -1163,7 +1163,12 @@ check_container_healthy() {
     log ERROR "Timeout after ${timeout}s. '$target' is not healthy."
     if [[ -n "$cids" ]]; then
         log INFO "Recent logs from $target:"
-        docker logs --tail 200 $(echo "$cids") || true
+        local _cid
+        while IFS= read -r _cid; do
+            [[ -n "$_cid" ]] || continue
+            log INFO "--- $_cid ---"
+            docker logs --tail 200 "$_cid" 2>&1 || true
+        done <<< "$cids"
     fi
     return 1
 }
@@ -1173,16 +1178,24 @@ check_container_healthy() {
 # Description:
 #     Wait until all compose containers are running and healthy (or timeout).
 #
-# Args:
-#     $1 -> timeout seconds (default 180)
-#     $2 -> interval seconds (default 10)
+# Tuning:
+#     HEALTH_TIMEOUT  seconds to wait in total   (default 180)
+#     HEALTH_INTERVAL seconds between polls      (default 20)
+#
+#     These were positional arguments, but in the life of this repo every call
+#     site used the defaults - dead API that shellcheck flagged as SC2120. They
+#     are environment variables now, which is how the rest of the toolkit is
+#     tuned (POSTGRES_SERVICE, BACKUP_REQUIRE_TLS, ...).
+#
+#     The old header also documented a 10s default interval while the code used
+#     20. The code was right; the comment was not.
 #
 # Returns:
 #     0 if all healthy before timeout; 1 on timeout.
 ################################################################################
 wait_for_containers_healthy() {
-    local timeout="${1:-180}"
-    local interval="${2:-20}"
+    local timeout="${HEALTH_TIMEOUT:-180}"
+    local interval="${HEALTH_INTERVAL:-20}"
     local elapsed=0
 
     discover_from_compose || true
@@ -1919,7 +1932,8 @@ send_email() {
     # and the rm below left SMTP_PASS in /tmp as plaintext.
     trap 'rm -f "$pass_tmp"' RETURN
     printf '%s' "$SMTP_PASS" > "$pass_tmp"; chmod 600 "$pass_tmp"
-    local boundary="=====n8n_backup_$(date +%s)_$$====="
+    local boundary
+    boundary="=====n8n_backup_$(date +%s)_$$====="
 
     {
         echo "From: $SMTP_USER"

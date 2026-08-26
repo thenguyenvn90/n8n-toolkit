@@ -38,7 +38,8 @@ find_or_install_bats() {
         "/opt/bats/bin/bats"
     do
         if [[ -x "$candidate" ]]; then
-            export PATH="$(dirname "$candidate"):$PATH"
+            candidate_dir="$(dirname "$candidate")"
+            export PATH="$candidate_dir:$PATH"
             info "bats found at: $candidate"
             return 0
         fi
