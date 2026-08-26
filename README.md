@@ -1,4 +1,4 @@
-# n8n-toolkit v3.3.3 — Install · Upgrade · Backup · Restore · Monitor · Diagnose
+# n8n-toolkit v3.4.0 — Install · Upgrade · Backup · Restore · Monitor · Diagnose
 
 **n8n-toolkit** is the all-in-one Bash CLI for fast, secure, and reliable n8n 2.x stack operations on Docker Compose.
 
